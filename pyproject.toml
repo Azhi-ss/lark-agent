@@ -1,0 +1,12 @@
+[project]
+name = "lark-agent"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "anthropic>=0.111.0",
+    "fastapi>=0.138.0",
+    "httpx[socks]>=0.28.1",
+    "uvicorn[standard]>=0.49.0",
+]

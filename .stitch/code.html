@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+
+<html class="light" lang="zh-CN"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Feishu Weekly AI - 飞书周报助手</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;600;700&amp;family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "on-tertiary-fixed": "#301400",
+                        "surface-container-high": "#ede5f4",
+                        "app-bg": "#f7f7f8",
+                        "on-tertiary-container": "#ffe0cd",
+                        "tertiary-fixed-dim": "#ffb784",
+                        "on-error-container": "#93000a",
+                        "on-secondary": "#ffffff",
+                        "error": "#ba1a1a",
+                        "surface-container-low": "#f9f1ff",
+                        "primary": "#630ed4",
+                        "thinking-gray": "#f3f4f6",
+                        "secondary-container": "#7cf994",
+                        "on-error": "#ffffff",
+                        "on-background": "#1d1a24",
+                        "on-surface": "#1d1a24",
+                        "surface-tint": "#732ee4",
+                        "primary-fixed": "#eaddff",
+                        "on-primary-container": "#ede0ff",
+                        "success-surface": "#f0fdf4",
+                        "inverse-on-surface": "#f6eefc",
+                        "surface-variant": "#e8dfee",
+                        "secondary-fixed": "#7ffc97",
+                        "inverse-surface": "#332f39",
+                        "on-surface-variant": "#4a4455",
+                        "surface-dim": "#dfd7e6",
+                        "outline-variant": "#ccc3d8",
+                        "surface-container-highest": "#e8dfee",
+                        "secondary": "#006e2d",
+                        "on-secondary-fixed": "#002109",
+                        "secondary-fixed-dim": "#62df7d",
+                        "danger-surface": "#fef2f2",
+                        "surface": "#fef7ff",
+                        "on-primary-fixed": "#25005a",
+                        "tertiary-fixed": "#ffdcc6",
+                        "on-primary-fixed-variant": "#5a00c6",
+                        "inverse-primary": "#d2bbff",
+                        "on-secondary-fixed-variant": "#005320",
+                        "primary-fixed-dim": "#d2bbff",
+                        "on-tertiary-fixed-variant": "#713700",
+                        "primary-container": "#7c3aed",
+                        "on-primary": "#ffffff",
+                        "surface-container": "#f3ebfa",
+                        "surface-container-lowest": "#ffffff",
+                        "tertiary": "#7d3d00",
+                        "danger-text": "#991b1b",
+                        "error-container": "#ffdad6",
+                        "on-secondary-container": "#007230",
+                        "background": "#fef7ff",
+                        "outline": "#7b7487",
+                        "on-tertiary": "#ffffff",
+                        "success-text": "#166534",
+                        "surface-bright": "#fef7ff",
+                        "tertiary-container": "#a15100"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.125rem",
+                        "lg": "0.25rem",
+                        "xl": "0.5rem",
+                        "full": "0.75rem"
+                    },
+                    "spacing": {
+                        "stack-gap": "12px",
+                        "container-margin": "24px",
+                        "gutter": "16px",
+                        "card-padding": "20px"
+                    },
+                    "fontFamily": {
+                        "headline-lg": ["Hanken Grotesk"],
+                        "label-caps": ["Inter"],
+                        "code-sm": ["JetBrains Mono"],
+                        "body-md": ["Inter"],
+                        "body-sm": ["Inter"],
+                        "headline-md": ["Hanken Grotesk"]
+                    },
+                    "fontSize": {
+                        "headline-lg": ["24px", {"lineHeight": "32px", "fontWeight": "700"}],
+                        "label-caps": ["11px", {"lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "700"}],
+                        "code-sm": ["13px", {"lineHeight": "20px", "fontWeight": "400"}],
+                        "body-md": ["15px", {"lineHeight": "24px", "fontWeight": "400"}],
+                        "body-sm": ["13px", {"lineHeight": "20px", "fontWeight": "400"}],
+                        "headline-md": ["20px", {"lineHeight": "28px", "fontWeight": "600"}]
+                    }
+                }
+            }
+        }
+    </script>
+<style>
+        .markdown-body h1 { @apply text-2xl font-bold mb-4 mt-6; }
+        .markdown-body h2 { @apply text-xl font-semibold mb-3 mt-5; }
+        .markdown-body h3 { @apply text-lg font-medium mb-2 mt-4; }
+        .markdown-body p { @apply mb-4 leading-relaxed; }
+        .markdown-body ul { @apply list-disc pl-5 mb-4; }
+        .markdown-body li { @apply mb-1; }
+        
+        .diff-added { @apply bg-success-surface text-success-text; }
+        .diff-removed { @apply bg-danger-surface text-danger-text line-through opacity-70; }
+        
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+            background-color: #ccc3d8;
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background-color: #7b7487;
+        }
+
+        .text-selection-highlight {
+            background-color: rgba(99, 14, 212, 0.15);
+            border-bottom: 2px solid #630ed4;
+            cursor: pointer;
+        }
+
+        .selection-popover {
+            filter: drop-shadow(0 4px 6px -1px rgb(0 0 0 / 0.1));
+            animation: fadeIn 0.2s ease-out;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(4px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body class="bg-app-bg text-on-background font-body-md h-screen flex flex-col overflow-hidden">
+<!-- TopNavBar -->
+<header class="bg-surface dark:bg-inverse-surface border-b border-outline-variant dark:border-outline docked full-width top-0 h-[64px] flex justify-between items-center px-container-margin w-full z-50 shrink-0">
+<div class="flex items-center gap-4">
+<h1 class="font-headline-md text-headline-md font-bold text-primary dark:text-primary-fixed flex items-center gap-2">
+            Feishu Weekly AI
+            <span class="bg-primary-container text-on-primary text-[10px] uppercase font-bold px-1.5 py-0.5 rounded-sm tracking-wider">Pro</span>
+</h1>
+</div>
+<div class="flex-1 max-w-2xl mx-8 relative">
+<div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+<span class="material-symbols-outlined text-outline">link</span>
+</div>
+<input class="block w-full pl-10 pr-32 py-2 border border-outline-variant rounded-DEFAULT bg-surface text-on-surface focus:ring-primary focus:border-primary sm:text-sm" placeholder="请输入飞书文档链接..." type="text" value="https://feishu.cn/docx/dcn...456"/>
+<div class="absolute inset-y-0 right-0 flex items-center pr-1">
+<button class="bg-primary text-on-primary px-4 py-1.5 rounded-DEFAULT font-medium text-sm hover:bg-surface-tint transition-colors">
+                加载文档
+            </button>
+</div>
+</div>
+<div class="flex items-center gap-2 text-on-surface-variant">
+<button aria-label="设置" class="p-2 hover:bg-surface-container-high transition-colors rounded-full">
+<span class="material-symbols-outlined">settings</span>
+</button>
+<button aria-label="帮助" class="p-2 hover:bg-surface-container-high transition-colors rounded-full">
+<span class="material-symbols-outlined">help</span>
+</button>
+</div>
+</header>
+<!-- Main Workspace -->
+<main class="flex-1 flex overflow-hidden">
+<!-- Left Pane (Document Area) -->
+<section class="w-1/2 flex flex-col bg-surface-container-lowest border-r border-outline-variant relative z-10 shadow-[2px_0_8px_rgba(0,0,0,0.02)]">
+<!-- Document Header -->
+<div class="px-container-margin py-4 border-b border-outline-variant bg-surface shrink-0 flex items-center justify-between">
+<div>
+<h2 class="font-body-md font-medium text-on-surface truncate pr-4">Product Team Sync.docx</h2>
+<div class="flex items-center gap-3 mt-1 font-body-sm text-on-surface-variant">
+<span class="flex items-center gap-1"><span class="material-symbols-outlined text-[16px]">fingerprint</span> ID: dcn...456</span>
+<span class="flex items-center gap-1"><span class="material-symbols-outlined text-[16px]">history</span> 版本: 12</span>
+<span class="flex items-center gap-1"><span class="material-symbols-outlined text-[16px]">data_object</span> 块: 24</span>
+</div>
+</div>
+<button class="p-1.5 rounded-DEFAULT text-outline hover:bg-surface-container hover:text-on-surface transition-colors" title="在飞书浏览器中打开">
+<span class="material-symbols-outlined">open_in_new</span>
+</button>
+</div>
+<!-- Document Body -->
+<div class="flex-1 overflow-y-auto px-10 py-8 relative">
+<div class="max-w-3xl mx-auto markdown-body font-body-md text-on-surface leading-[1.6]">
+<h1>周报 - 10月第4周</h1>
+<h2>1. 主要成就</h2>
+<ul>
+<li>成功在所有地区发布了全新的统一仪表板。</li>
+<li>在Q3基础设施升级后，API延迟降低了15%。</li>
+<li>新入驻3家企业客户，促使MRR增长5%。</li>
+</ul>
+<h2>2. 项目状态更新</h2>
+<h3>移动端应用重构</h3>
+<p>
+                    设计阶段已完成。开发团队目前正在实现新的组件库。
+                    <span class="text-selection-highlight relative group">
+                        由于意外的依赖冲突，我们进度略微落后于计划，但预计在下个冲刺阶段恢复。
+                        <!-- Floating selection button -->
+<button class="absolute -top-10 left-1/2 -translate-x-1/2 selection-popover bg-primary text-on-primary p-2 rounded-full shadow-md hover:bg-surface-tint transition-all flex items-center justify-center" title="针对此段修改"><span class="material-symbols-outlined text-[20px]">magic_button</span></button>
+</span>
+</p>
+<h3>数据迁移策略</h3>
+<p>初步规划已敲定。我们需要DevOps团队分配更多资源，以确保无停机时间的平滑过渡。</p>
+<h2>3. 下周重点工作</h2>
+<ul>
+<li>解决与Web客户端会话超时相关的P1级别Bug。</li>
+<li>完成面向利益相关者的Q4路线图演示文稿。</li>
+<li>对前端工程团队进行绩效评估。</li>
+</ul>
+</div>
+</div>
+</section>
+<!-- Right Pane (Agent Area) -->
+<section class="w-1/2 flex flex-col bg-app-bg relative">
+<!-- Instruction Section -->
+<div class="p-container-margin border-b border-outline-variant bg-surface shrink-0">
+<!-- Context Indicator (Added for selection functionality) -->
+<div class="mb-3 flex items-center gap-2">
+<div class="flex-1 flex items-center gap-2 bg-primary-container/10 border border-primary/20 rounded px-3 py-2">
+<span class="material-symbols-outlined text-primary text-[18px]">format_quote</span>
+<div class="flex-1 min-w-0">
+<p class="text-xs font-label-caps text-primary mb-0.5">已选中内容</p>
+<p class="text-sm text-on-surface truncate italic">“由于意外的依赖冲突，我们进度略微落后于计划...”</p>
+</div>
+<button class="text-outline hover:text-primary transition-colors">
+<span class="material-symbols-outlined text-[16px]">close</span>
+</button>
+</div>
+</div>
+<div class="relative rounded-lg border border-outline-variant bg-surface-container-lowest focus-within:ring-2 focus-within:ring-primary focus-within:border-primary transition-all">
+<textarea class="w-full bg-transparent border-none resize-none focus:ring-0 p-4 min-h-[100px] text-on-surface font-body-md" placeholder="请告诉我你想如何修改这段内容...">请帮我优化这段话的语气，更正式一些，并明确滞后的天数（预计2天）。</textarea>
+<div class="flex items-center justify-between px-4 py-3 bg-surface-container border-t border-outline-variant rounded-b-lg">
+<div class="flex gap-2">
+<button class="px-3 py-1 bg-surface-container-high rounded-full font-body-sm text-on-surface-variant hover:bg-surface-variant transition-colors">
+                            总结
+                        </button>
+<button class="px-3 py-1 bg-primary/10 text-primary border border-primary/20 rounded-full font-body-sm hover:bg-primary/20 transition-colors">
+                            润色语气
+                        </button>
+</div>
+<button class="bg-primary text-on-primary px-4 py-1.5 rounded-DEFAULT font-medium text-sm hover:bg-surface-tint transition-colors flex items-center gap-2">
+<span class="material-symbols-outlined text-[18px]">magic_button</span>
+                        开始处理
+                    </button>
+</div>
+</div>
+</div>
+<!-- Output Stream -->
+<div class="flex-1 overflow-y-auto p-container-margin flex flex-col gap-stack-gap">
+<!-- Thinking Card -->
+<div class="bg-thinking-gray rounded-lg border border-outline-variant overflow-hidden group">
+<button class="w-full flex items-center justify-between p-3 text-left hover:bg-surface-variant transition-colors" onclick="this.nextElementSibling.classList.toggle('hidden')">
+<span class="font-code-sm text-on-surface-variant flex items-center gap-2">
+<span class="material-symbols-outlined text-[16px] animate-spin text-primary">sync</span>
+                        正在针对选中段落分析语义...
+                    </span>
+<span class="material-symbols-outlined text-outline group-hover:text-on-surface transition-colors">expand_more</span>
+</button>
+<div class="p-4 border-t border-outline-variant font-code-sm text-on-surface-variant bg-surface-container-lowest hidden">
+<p>&gt; 指令：优化语气，明确滞后天数。</p>
+<p>&gt; 上下文：项目状态更新 - 移动端应用重构。</p>
+<p>&gt; 正在生成修改建议...</p>
+</div>
+</div>
+<!-- Agent Reply -->
+<div class="flex gap-3">
+<div class="w-8 h-8 rounded-full bg-primary-container text-on-primary-container flex items-center justify-center shrink-0">
+<span class="material-symbols-outlined text-[20px]">smart_toy</span>
+</div>
+<div class="bg-surface border border-outline-variant rounded-lg rounded-tl-none p-4 shadow-sm max-w-[85%]">
+<p class="text-on-surface font-body-md">我已根据您的要求优化了选中内容。我将非正式表达改为了更具职场色彩的措辞，并加入了 2 天的滞后量化。</p>
+</div>
+</div>
+<!-- Diff Cards -->
+<div class="flex flex-col gap-4 mt-2 pl-11">
+<!-- Diff Card 1 (Contextual Selection) -->
+<div class="bg-surface rounded-lg border border-primary/30 shadow-[0_4px_12px_rgba(99,14,212,0.06)] overflow-hidden">
+<div class="px-4 py-3 border-b border-outline-variant bg-primary-container/5 flex items-center justify-between">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-primary text-[18px]">selection_check</span>
+<h4 class="font-headline-md text-[16px] font-semibold text-on-surface">修改建议: 基于选中内容</h4>
+</div>
+<span class="px-2 py-0.5 bg-primary/10 text-primary rounded-sm font-label-caps border border-primary/20">专业度提升</span>
+</div>
+<div class="px-4 py-2 bg-surface-container-low border-b border-outline-variant">
+<p class="font-body-sm text-on-surface-variant">修改理由: 增强了语言专业性，将模糊的“略微落后”量化为具体天数，增加公信力。</p>
+</div>
+<div class="p-4 font-body-md font-code-sm leading-relaxed">
+<div class="diff-removed p-2 rounded mb-2 flex items-start gap-2">
+<span class="material-symbols-outlined text-[16px] mt-0.5 shrink-0">remove</span>
+<span>由于意外的依赖冲突，我们进度略微落后于计划，但预计在下个冲刺阶段恢复。</span>
+</div>
+<div class="diff-added p-2 rounded flex items-start gap-2">
+<span class="material-symbols-outlined text-[16px] mt-0.5 shrink-0">add</span>
+<span>因不可预见的依赖冲突，开发进度出现 2 个工作日的滞后；目前已启动应急预案，预计在下个 Sprint 完成追赶。</span>
+</div>
+</div>
+<div class="px-4 py-3 bg-surface-container-lowest border-t border-outline-variant flex justify-end gap-2">
+<button class="px-3 py-1 text-on-surface-variant hover:bg-surface-variant rounded transition-colors font-body-sm">拒绝</button>
+<button class="px-3 py-1 bg-primary text-on-primary hover:bg-surface-tint rounded transition-colors font-body-sm">接受修改</button>
+</div>
+</div>
+</div>
+</div>
+</section>
+</main>
+<!-- Footer -->
+<footer class="bg-surface-container dark:bg-surface-container-highest border-t border-outline-variant bg-surface-container docked full-width bottom-0 h-[80px] fixed bottom-0 w-full z-50 flex items-center justify-between px-container-margin shrink-0">
+<div class="flex items-center gap-2 text-secondary dark:text-secondary-fixed">
+<span class="material-symbols-outlined text-[20px]">warning</span>
+<span class="font-label-caps text-label-caps">安全提示：AI 生成内容在写回前请务必审阅。</span>
+</div>
+<div class="flex items-center gap-4">
+<div class="flex gap-4 mr-4">
+<a class="font-label-caps text-label-caps text-on-surface-variant hover:text-primary transition-colors focus:ring-2 focus:ring-primary rounded" href="#">服务协议</a>
+<a class="font-label-caps text-label-caps text-on-surface-variant hover:text-primary transition-colors focus:ring-2 focus:ring-primary rounded" href="#">隐私政策</a>
+</div>
+<button class="bg-secondary text-on-secondary px-6 py-2.5 rounded-lg font-medium shadow-sm hover:bg-secondary-container hover:text-on-secondary-container transition-colors flex items-center gap-2">
+<span class="material-symbols-outlined">sync</span>
+            确认并写回飞书 (1 处选中修改)
+        </button>
+</div>
+</footer>
+</body></html>
