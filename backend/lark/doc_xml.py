@@ -153,13 +153,13 @@ def diff_blocks(old: list[Block], new: list[Block]) -> list[DiffOp]:
             for k in range(i1 + n, i2):
                 ops.append(DiffOp(tag="delete", old=old[k], new=None))
             for k in range(j1 + n, j2):
-                ops.append(DiffOp(tag="insert", old=None, new=new[j1 + k]))
+                ops.append(DiffOp(tag="insert", old=None, new=new[k]))
         elif tag == "delete":
             for k in range(i1, i2):
                 ops.append(DiffOp(tag="delete", old=old[k], new=None))
         elif tag == "insert":
             for k in range(j1, j2):
-                ops.append(DiffOp(tag="insert", old=None, new=new[j1 + k]))
+                ops.append(DiffOp(tag="insert", old=None, new=new[k]))
     return ops
 
 
