@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
+
 import pytest
 
 from backend.lark.doc_xml import (
@@ -19,7 +21,7 @@ from backend.lark.doc_xml import (
 def test_block_is_frozen():
     """Block 必须不可变(frozen dataclass),赋值应抛 FrozenInstanceError。"""
     b = Block(kind="p", text="hi")
-    with pytest.raises(Exception):
+    with pytest.raises(FrozenInstanceError):
         b.text = "mutated"  # type: ignore[misc]
 
 

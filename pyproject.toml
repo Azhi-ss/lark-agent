@@ -15,8 +15,21 @@ dependencies = [
 dev = [
     "httpx>=0.28.1",
     "pytest>=9.1.1",
+    "ruff>=0.15.18",
 ]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+# 默认 E/F 基础上,加 import 排序、pyupgrade、bugbear
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# agent.py 的 SYSTEM_PROMPT 是中文长文本,行宽规则不适用
+"backend/agent/agent.py" = ["E501"]

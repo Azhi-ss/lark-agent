@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
+
 import pytest
 
 from backend.config import Settings, _find_lark_cli, settings
@@ -13,7 +15,7 @@ from backend.config import Settings, _find_lark_cli, settings
 def test_settings_is_frozen():
     """Settings 必须 frozen,字段赋值应抛异常。"""
     s = Settings()
-    with pytest.raises(Exception):
+    with pytest.raises(FrozenInstanceError):
         s.lark_as = "tenant"  # type: ignore[misc]
 
 

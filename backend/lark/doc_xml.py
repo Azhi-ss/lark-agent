@@ -30,7 +30,7 @@ class Block:
     text: str  # 该块的纯文本（递归抽取）
     level: int = 0  # 标题级别（h1=1, h2=2...），非标题为 0
     raw_xml: str = ""  # 原始 XML 片段，用于 str_replace / 回显
-    children: tuple["Block", ...] = field(default_factory=tuple)
+    children: tuple[Block, ...] = field(default_factory=tuple)
     meta: dict[str, str] = field(default_factory=dict)  # 额外属性（seq, lang, href ...）
 
     @property

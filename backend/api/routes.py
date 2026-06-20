@@ -5,7 +5,7 @@ import io
 import json
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -73,7 +73,7 @@ def load_doc(req: LoadRequest) -> LoadResponse:
         md = fetch_doc(req.url, doc_format="markdown")
         xml = fetch_doc(req.url, doc_format="xml")
     except LarkError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     blocks = parse_xml(xml.content_xml)
     return LoadResponse(
         document_id=md.document_id,
@@ -242,7 +242,7 @@ def workspace_save(req: WorkspaceSaveRequest) -> WorkspaceSaveResponse:
     """保存方案构建会话到 ~/.lark_agent/sessions/{session_id}.json。"""
     sessions_dir = _ensure_sessions_dir()
     session_id = req.session_id or uuid.uuid4().hex
-    saved_at = datetime.now(timezone.utc).isoformat()
+    saved_at = datetime.now(UTC).isoformat()
     payload: dict[str, Any] = {
         "session_id": session_id,
         "name": req.name,
