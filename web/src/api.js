@@ -20,6 +20,31 @@ export async function health() {
   return res.json()
 }
 
+// ===== LLM 设置（运行时可改） =====
+
+export async function getLlmSettings() {
+  const res = await fetch(`${BASE}/settings/llm`)
+  if (!res.ok) throw new Error(`读取 LLM 设置失败 (${res.status})`)
+  return res.json()
+}
+
+/**
+ * 保存 LLM 设置。密码字段传 null 表示"不改保留原值"，传空串表示"清空"。
+ * @param {{base_url?:string|null, api_key?:string|null, auth_token?:string|null, model?:string|null}} patch
+ */
+export async function saveLlmSettings(patch) {
+  const res = await fetch(`${BASE}/settings/llm`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || `保存 LLM 设置失败 (${res.status})`)
+  }
+  return res.json()
+}
+
 /**
  * 流式调用 agent，通过 SSE 接收事件。
  * @param {string} markdown

@@ -24,3 +24,44 @@ class Settings:
 
 
 settings = Settings()
+
+
+# ----- 运行时可变的 LLM 接入配置 -----
+#
+# 启动配置 Settings 是 frozen 的（不可变原则）。但 LLM 的 base_url / api_key /
+# model 需要支持运行时从设置面板修改，因此单独放一个可变状态对象。默认值仍从
+# 环境变量取，首次启动等价于旧行为；设置面板 POST 后即时覆盖。
+@dataclass
+class RuntimeLLMConfig:
+    """运行时可修改的 LLM 接入配置。"""
+
+    base_url: str = os.environ.get("ANTHROPIC_BASE_URL", "")
+    api_key: str = os.environ.get("ANTHROPIC_API_KEY", "")
+    auth_token: str = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+    model: str = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+
+
+_runtime_llm = RuntimeLLMConfig()
+
+
+def get_runtime_llm() -> RuntimeLLMConfig:
+    """返回运行时 LLM 配置单例。"""
+    return _runtime_llm
+
+
+def update_runtime_llm(
+    *,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    auth_token: str | None = None,
+    model: str | None = None,
+) -> None:
+    """部分更新运行时 LLM 配置；传 None 的字段保持不变（用于密码框留空=不改）。"""
+    if base_url is not None:
+        _runtime_llm.base_url = base_url
+    if api_key is not None:
+        _runtime_llm.api_key = api_key
+    if auth_token is not None:
+        _runtime_llm.auth_token = auth_token
+    if model is not None:
+        _runtime_llm.model = model

@@ -3,7 +3,7 @@ defineProps({
   modelValue: { type: String, required: true },
   loading: { type: Boolean, default: false },
 })
-defineEmits(['update:modelValue', 'load'])
+defineEmits(['update:modelValue', 'load', 'open-settings'])
 </script>
 
 <template>
@@ -83,6 +83,7 @@ defineEmits(['update:modelValue', 'load'])
       <slot name="tabs" />
       <button
         aria-label="设置"
+        @click="$emit('open-settings')"
         class="p-2 rounded-full transition-colors hover:bg-[var(--color-surface-container-high)]"
       >
         <span class="material-symbols-outlined">settings</span>

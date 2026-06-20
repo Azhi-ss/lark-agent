@@ -6,8 +6,10 @@ import DocPane from './components/DocPane.vue'
 import AgentPane from './components/AgentPane.vue'
 import AppFooter from './components/AppFooter.vue'
 import WorkspaceView from './components/WorkspaceView.vue'
+import SettingsModal from './components/SettingsModal.vue'
 
 const activeMode = ref('editor') // 'editor' | 'workspace'
+const settingsOpen = ref(false)
 
 const docUrl = ref('https://dptechnology.feishu.cn/wiki/OWAIwHYLJiyEHjkJvRAcEmKnn7y')
 const markdown = ref('')
@@ -181,7 +183,7 @@ const markdownHtml = computed(() => renderMd(markdown.value))
 
 <template>
   <div class="h-screen flex flex-col overflow-hidden">
-    <TopBar v-model="docUrl" :loading="loading" @load="onLoad">
+    <TopBar v-model="docUrl" :loading="loading" @load="onLoad" @open-settings="settingsOpen = true">
       <template #tabs>
         <div
           class="flex items-center rounded-lg p-0.5"
@@ -267,6 +269,12 @@ const markdownHtml = computed(() => renderMd(markdown.value))
       :apply-status="applyStatus"
       :applying="applying"
       @apply="onApply"
+    />
+
+    <SettingsModal
+      :open="settingsOpen"
+      @close="settingsOpen = false"
+      @saved="(cfg) => (settingsOpen = false)"
     />
   </div>
 </template>

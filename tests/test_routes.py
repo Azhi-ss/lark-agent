@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from backend.config import Settings
+from backend.config import Settings, update_runtime_llm
 from backend.lark.cli_wrapper import FetchResult
 from backend.main import app
 
@@ -120,3 +120,77 @@ def test_export_markdown_downloads_attachment():
     assert "attachment" in resp.headers["content-disposition"]
     assert "weekly.md" in resp.headers["content-disposition"]
     assert resp.text == "# hi"
+
+
+# ===== LLM 设置端点 =====
+# 运行时配置是全局单例,这里显式设已知值,避免被其它测试污染。
+
+
+def _reset_llm(**kwargs):
+    """把运行时 LLM 配置设为已知值,缺省字段填空串。"""
+    update_runtime_llm(
+        base_url=kwargs.get("base_url", ""),
+        api_key=kwargs.get("api_key", ""),
+        auth_token=kwargs.get("auth_token", ""),
+        model=kwargs.get("model", "test-model"),
+    )
+
+
+def test_get_llm_settings_returns_contract_and_masks_secrets():
+    """GET /api/settings/llm 返回 base_url/model 明文,api_key/auth_token 只回布尔。"""
+    _reset_llm(base_url="https://proxy.example.com", api_key="sk-secret", model="m1")
+    resp = client.get("/api/settings/llm")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["base_url"] == "https://proxy.example.com"
+    assert body["model"] == "m1"
+    assert body["has_api_key"] is True
+    assert body["has_auth_token"] is False
+    # 不应泄漏明文密钥
+    assert "sk-secret" not in resp.text
+
+
+def test_update_llm_settings_overwrites_base_url_and_model():
+    """POST 更新 base_url/model,GET 立即反映。"""
+    _reset_llm()
+    resp = client.post(
+        "/api/settings/llm",
+        json={"base_url": "https://new-proxy.example.com", "model": "glm-5.2"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["base_url"] == "https://new-proxy.example.com"
+    assert body["model"] == "glm-5.2"
+
+    # 再 GET 确认持久(进程内)
+    assert client.get("/api/settings/llm").json()["base_url"] == "https://new-proxy.example.com"
+
+
+def test_update_llm_settings_none_fields_keep_old_secret():
+    """密码框留空(传 None)时,原 api_key 保留,has_api_key 仍为 True。"""
+    _reset_llm(api_key="sk-keep")
+    resp = client.post(
+        "/api/settings/llm",
+        json={"base_url": "https://x.example.com"},  # 不传 api_key
+    )
+    assert resp.status_code == 200
+    assert resp.json()["has_api_key"] is True  # 旧 key 仍在
+
+
+def test_update_llm_settings_empty_string_clears_secret():
+    """显式传空串表示清空该凭证,has_* 应变 False。"""
+    _reset_llm(api_key="sk-keep", auth_token="tok-keep")
+    resp = client.post(
+        "/api/settings/llm",
+        json={"api_key": "", "auth_token": ""},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["has_api_key"] is False
+    assert body["has_auth_token"] is False
+
+
+def test_health_reflects_runtime_model():
+    """/api/health 的 model 取自运行时配置,改设置后 health 同步变化。"""
+    _reset_llm(model="health-model-xyz")
+    assert client.get("/api/health").json()["model"] == "health-model-xyz"

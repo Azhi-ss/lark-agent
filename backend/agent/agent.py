@@ -8,14 +8,13 @@
 """
 from __future__ import annotations
 
-import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
 import anthropic
 
-from backend.config import settings
+from backend.config import get_runtime_llm
 
 SYSTEM_PROMPT_SOLUTION = """你是方案架构师。用户会给你 N 份上下文文档（需求文档 / 聊天记录 / 能力清单 / 现有方案等）以及一段对话历史。你的目标是基于全部上下文和对话语境，产出一份完整、结构化、可落地的解决方案。
 
@@ -124,14 +123,18 @@ class Solution:
 
 
 def _make_client() -> anthropic.Anthropic:
-    """构造 anthropic client，兼容火山代理（base_url + auth_token）。"""
+    """构造 anthropic client，兼容火山代理（base_url + auth_token）。
+
+    读运行时可变配置（设置面板可改），而非每次读 os.environ。
+    """
+    cfg = get_runtime_llm()
     kwargs: dict[str, Any] = {}
-    if settings.anthropic_api_key:
-        kwargs["api_key"] = settings.anthropic_api_key
+    if cfg.api_key:
+        kwargs["api_key"] = cfg.api_key
     else:
-        # 走环境里的火山代理：ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN
-        kwargs["auth_token"] = os.environ["ANTHROPIC_AUTH_TOKEN"]
-        kwargs["base_url"] = os.environ["ANTHROPIC_BASE_URL"]
+        # 走代理：base_url + auth_token
+        kwargs["auth_token"] = cfg.auth_token
+        kwargs["base_url"] = cfg.base_url
     return anthropic.Anthropic(**kwargs)
 
 
@@ -145,7 +148,7 @@ def run_agent(
     client = _make_client()
     user_msg = f"# 周报原文（Markdown）\n\n{markdown}\n\n---\n# 编辑指令\n{instruction}"
     resp = client.messages.create(
-        model=model or settings.anthropic_model,
+        model=model or get_runtime_llm().model,
         max_tokens=4096,
         system=SYSTEM_PROMPT,
         tools=[EDIT_TOOL],
@@ -188,7 +191,7 @@ def run_agent_stream(
     user_msg = f"# 周报原文（Markdown）\n\n{markdown}\n\n---\n# 编辑指令\n{instruction}"
     try:
         with client.messages.stream(
-            model=model or settings.anthropic_model,
+            model=model or get_runtime_llm().model,
             max_tokens=4096,
             system=SYSTEM_PROMPT,
             tools=[EDIT_TOOL],
@@ -289,7 +292,7 @@ def run_solution_stream(
 
     try:
         with client.messages.stream(
-            model=model or settings.anthropic_model,
+            model=model or get_runtime_llm().model,
             max_tokens=8192,
             system=SYSTEM_PROMPT_SOLUTION,
             tools=[PRODUCE_TOOL],

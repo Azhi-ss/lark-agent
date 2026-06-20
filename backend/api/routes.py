@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from backend.agent.agent import run_agent_stream, run_solution_stream
-from backend.config import settings
+from backend.config import get_runtime_llm, settings, update_runtime_llm
 from backend.lark.cli_wrapper import LarkError, fetch_doc, update_doc
 from backend.lark.doc_xml import parse_xml
 
@@ -157,8 +157,58 @@ def health() -> dict[str, Any]:
     return {
         "ok": True,
         "writeback_enabled": settings.writeback_enabled,
-        "model": settings.anthropic_model,
+        "model": get_runtime_llm().model,
     }
+
+
+# ===== LLM 设置（运行时可改） =====
+
+
+class LlmSettingsResponse(BaseModel):
+    """LLM 接入配置；敏感字段只回布尔，不回明文。"""
+
+    base_url: str
+    model: str
+    has_api_key: bool
+    has_auth_token: bool
+
+
+class LlmSettingsUpdate(BaseModel):
+    """部分更新；留空（None）的字段保持不变，用于密码框留空=不改。"""
+
+    base_url: str | None = None
+    api_key: str | None = None
+    auth_token: str | None = None
+    model: str | None = None
+
+
+def _llm_response() -> LlmSettingsResponse:
+    cfg = get_runtime_llm()
+    return LlmSettingsResponse(
+        base_url=cfg.base_url,
+        model=cfg.model,
+        has_api_key=bool(cfg.api_key),
+        has_auth_token=bool(cfg.auth_token),
+    )
+
+
+@router.get("/settings/llm", response_model=LlmSettingsResponse)
+def get_llm_settings() -> LlmSettingsResponse:
+    """读取当前 LLM 接入配置（敏感字段脱敏）。"""
+    return _llm_response()
+
+
+@router.post("/settings/llm", response_model=LlmSettingsResponse)
+def update_llm_settings(req: LlmSettingsUpdate) -> LlmSettingsResponse:
+    """更新 LLM 接入配置；None 字段不覆盖（密码框留空=保留原值）。"""
+    # 空串视为"清空该字段"的明确意图，仅在 None 时跳过
+    update_runtime_llm(
+        base_url=req.base_url,
+        api_key=req.api_key,
+        auth_token=req.auth_token,
+        model=req.model,
+    )
+    return _llm_response()
 
 
 # ===== Phase 2 新增端点 =====
