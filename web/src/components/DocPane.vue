@@ -6,6 +6,7 @@ const props = defineProps({
   docMeta: { type: Object, required: true },
   blocks: { type: Array, default: () => [] },
   loadError: { type: String, default: '' },
+  recentDocs: { type: Array, default: () => [] },
 })
 const emit = defineEmits([
   'open-external',
@@ -13,6 +14,9 @@ const emit = defineEmits([
   'reject-suggestion',
   'reset-block',
   'edit-block',
+  'load-recent',
+  'remove-recent',
+  'open-search',
 ])
 
 // P1 仅这些 kind 可编辑（§5.5）
@@ -248,19 +252,75 @@ function truncate(s, n) {
 
     <!-- 文档正文：逐 block 渲染 -->
     <div class="flex-1 overflow-y-auto px-10 py-8 relative">
-      <div v-if="!loaded" class="text-center mt-20">
-        <span
-          class="material-symbols-outlined text-[48px]"
-          :style="{ color: 'var(--color-outline-variant)' }"
-        >
-          description
-        </span>
-        <p
-          class="mt-3 text-sm"
-          :style="{ color: 'var(--color-on-surface-variant)' }"
-        >
-          输入飞书周报 URL 并点击「加载文档」
-        </p>
+      <div v-if="!loaded" class="mt-10 max-w-xl mx-auto">
+        <div class="text-center">
+          <span
+            class="material-symbols-outlined text-[48px]"
+            :style="{ color: 'var(--color-outline-variant)' }"
+          >
+            description
+          </span>
+          <p
+            class="mt-3 text-sm"
+            :style="{ color: 'var(--color-on-surface-variant)' }"
+          >
+            输入飞书文档 URL 加载，或从最近访问中选一份
+          </p>
+          <button
+            @click="$emit('open-search')"
+            class="mt-3 px-3 py-1.5 rounded text-[13px] font-medium transition-colors inline-flex items-center gap-1"
+            :style="{
+              background: 'var(--color-surface-container-high)',
+              color: 'var(--color-primary)',
+            }"
+          >
+            <span class="material-symbols-outlined text-[16px]">search</span>
+            搜索文档
+          </button>
+        </div>
+
+        <!-- 最近访问 -->
+        <div v-if="recentDocs.length > 0" class="mt-8">
+          <div
+            class="flex items-center gap-1.5 mb-3 text-[12px] font-medium uppercase tracking-wide"
+            :style="{ color: 'var(--color-on-surface-variant)' }"
+          >
+            <span class="material-symbols-outlined text-[15px]">history</span>
+            最近访问
+          </div>
+          <div class="flex flex-col gap-1.5">
+            <div
+              v-for="doc in recentDocs"
+              :key="doc.url"
+              class="group flex items-center gap-2 px-3 py-2 rounded cursor-pointer transition-colors"
+              :style="{
+                background: 'var(--color-surface-container-lowest)',
+                border: '1px solid var(--color-outline-variant)',
+              }"
+              @click="$emit('load-recent', doc.url)"
+            >
+              <span
+                class="material-symbols-outlined text-[18px] shrink-0"
+                :style="{ color: 'var(--color-primary)' }"
+                >description</span
+              >
+              <span
+                class="flex-1 min-w-0 text-[13px] truncate"
+                :style="{ color: 'var(--color-on-surface)' }"
+                :title="doc.title"
+                >{{ doc.title }}</span
+              >
+              <button
+                aria-label="移除"
+                class="shrink-0 p-1 rounded-full opacity-0 group-hover:opacity-100 transition-opacity hover:bg-[var(--color-surface-container-high)]"
+                :style="{ color: 'var(--color-on-surface-variant)' }"
+                @click.stop="$emit('remove-recent', doc.url)"
+              >
+                <span class="material-symbols-outlined text-[15px]">close</span>
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div

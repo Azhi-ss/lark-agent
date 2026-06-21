@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { loadDoc, chatAgent, applyEdits } from './api.js'
+import { recordRecent, listRecent, removeRecent } from './recentDocs.js'
 import TopBar from './components/TopBar.vue'
 import DocPane from './components/DocPane.vue'
 import AgentPane from './components/AgentPane.vue'
@@ -50,6 +51,32 @@ const docPaneRef = ref(null)
 const loaded = computed(() => markdown.value.length > 0)
 const editedCount = computed(() => blocks.value.filter((b) => b.edited).length)
 
+// 最近访问文档（localStorage 持久化），加载成功后记录并刷新
+const recentDocs = ref(listRecent())
+
+function docTitleFromLoad(data) {
+  // 优先取首个 title 块文本，回退 markdown 首个非空标题行，再回退 document_id
+  const titleBlock = (data.blocks || []).find((b) => b.kind === 'title')
+  if (titleBlock?.text?.trim()) return titleBlock.text.trim()
+  const mdLine = (data.markdown || '')
+    .split('\n')
+    .map((l) => l.trim())
+    .find((l) => /^#{1,6}\s+/.test(l))
+  if (mdLine) return mdLine.replace(/^#{1,6}\s+/, '')
+  return data.document_id || ''
+}
+
+function loadRecent(url) {
+  if (!url || loading.value) return
+  docUrl.value = url
+  onLoad()
+}
+
+function onRemoveRecent(url) {
+  removeRecent(url)
+  recentDocs.value = listRecent()
+}
+
 async function onLoad() {
   if (loading.value) return
   loading.value = true
@@ -80,6 +107,9 @@ async function onLoad() {
       edited: false,
       suggestion: null,
     }))
+    // 加载成功 → 记录到最近访问（localStorage 持久化）
+    recordRecent(docUrl.value, docTitleFromLoad(data))
+    recentDocs.value = listRecent()
   } catch (e) {
     loadError.value = e.message
   } finally {
@@ -298,11 +328,15 @@ function onOpenExternal() {
           :doc-meta="docMeta"
           :blocks="blocks"
           :load-error="loadError"
+          :recent-docs="recentDocs"
           @open-external="onOpenExternal"
           @accept-suggestion="acceptSuggestion"
           @reject-suggestion="rejectSuggestion"
           @reset-block="resetBlock"
           @edit-block="editBlock"
+          @load-recent="loadRecent"
+          @remove-recent="onRemoveRecent"
+          @open-search="searchOpen = true"
         />
         <AgentPane
           :loaded="loaded"
