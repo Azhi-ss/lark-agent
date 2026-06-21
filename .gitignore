@@ -12,3 +12,16 @@ wheels/
 
 # macOS
 .DS_Store
+
+# Node / 前端
+node_modules/
+web/dist/
+web/.vite/
+
+# 环境与密钥（只提交 .env.example）
+.env
+.env.*
+!.env.example
+
+# 本地会话与运行产物
+*.log
