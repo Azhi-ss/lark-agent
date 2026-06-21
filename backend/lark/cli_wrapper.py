@@ -86,6 +86,95 @@ def fetch_doc(doc_ref: str, *, doc_format: str = "xml") -> FetchResult:
     )
 
 
+@dataclass(frozen=True)
+class SearchItem:
+    """单条搜索结果（不可变，已规整为前端友好字段）。"""
+
+    url: str
+    title: str  # 纯文本（高亮已转 <mark>）
+    summary: str  # 纯文本（高亮已转 <mark>）
+    owner: str
+    updated_at: str  # ISO 字符串
+    doc_type: str  # DOCX / SHEET / ...
+    entity_type: str  # WIKI / DOC
+
+
+@dataclass(frozen=True)
+class SearchResult:
+    """搜索结果集（不可变）。"""
+
+    items: tuple[SearchItem, ...]
+    has_more: bool
+    page_token: str
+
+
+def search_docs(
+    query: str,
+    *,
+    page_size: int = 15,
+    page_token: str | None = None,
+) -> SearchResult:
+    """搜索飞书文档（docx/wiki/sheet）。
+
+    Args:
+        query: 搜索关键词。
+        page_size: 每页条数（lark 上限 20）。
+        page_token: 上一页返回的 token，取下一页。
+    """
+    args = [
+        settings.lark_cli, "docs", "+search",
+        "--api-version", settings.api_version,
+        "--as", settings.lark_as,
+        "--query", query,
+        "--page-size", str(page_size),
+    ]
+    if page_token:
+        args += ["--page-token", page_token]
+    payload = _run(args)
+    data = payload.get("data", {})
+    raw_items = data.get("results", []) or []
+    items = tuple(_parse_search_item(r) for r in raw_items)
+    return SearchResult(
+        items=items,
+        has_more=bool(data.get("has_more", False)),
+        page_token=str(data.get("page_token", "") or ""),
+    )
+
+
+def _parse_search_item(raw: dict[str, Any]) -> SearchItem:
+    """把 lark 搜索原始条目规整为 SearchItem。"""
+    meta = raw.get("result_meta", {}) or {}
+    return SearchItem(
+        url=str(meta.get("url", "")),
+        title=_to_safe_highlight(str(raw.get("title_highlighted", "") or meta.get("title", ""))),
+        summary=_to_safe_highlight(str(raw.get("summary_highlighted", ""))),
+        owner=str(meta.get("owner_name", "") or ""),
+        updated_at=str(meta.get("update_time_iso", "") or ""),
+        doc_type=str(meta.get("doc_types", "") or ""),
+        entity_type=str(raw.get("entity_type", "") or ""),
+    )
+
+
+def _to_safe_highlight(text: str) -> str:
+    """把 lark 高亮串转成只含 <mark> 的安全 HTML。
+
+    策略：先全文 HTML 转义（锁死 XSS），再把 lark 的 <h>/<hb>/<b> 标签还原为 <mark>。
+    其余内容（含用户原始文本）保持转义，无法注入任意标签。
+    """
+    import html
+
+    # 1. 全文转义：所有 < > & 变实体
+    escaped = html.escape(text, quote=False)
+    # 2. lark 高亮标签已变成实体形式（&lt;h&gt; 等），还原为 <mark>...</mark>
+    #    只匹配这几种已知标签，其余实体保持转义
+    for tag in ("h", "hb", "b"):
+        # 闭合标签 </tag>
+        escaped = escaped.replace(f"&lt;/{tag}&gt;", "</mark>")
+        # 开标签 <tag>（不含属性，lark 高亮标签无属性）
+        escaped = escaped.replace(f"&lt;{tag}&gt;", "<mark>")
+    return escaped
+
+
 def update_doc(
     doc_ref: str,
     *,

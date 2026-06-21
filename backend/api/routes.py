@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from backend.agent.agent import run_agent_stream, run_solution_stream
 from backend.config import get_runtime_llm, settings, update_runtime_llm
-from backend.lark.cli_wrapper import LarkError, fetch_doc, update_doc
+from backend.lark.cli_wrapper import LarkError, fetch_doc, search_docs, update_doc
 from backend.lark.doc_xml import parse_xml
 
 router = APIRouter()
@@ -294,6 +294,56 @@ def test_llm_settings(req: LlmTestRequest) -> LlmTestResponse:
 
 
 # ===== Phase 2 新增端点 =====
+
+
+# ===== 文档搜索 =====
+
+
+class SearchItemOut(BaseModel):
+    url: str
+    title: str
+    summary: str
+    owner: str
+    updated_at: str
+    doc_type: str
+    entity_type: str
+
+
+class SearchResponse(BaseModel):
+    results: list[SearchItemOut]
+    has_more: bool
+    page_token: str
+
+
+@router.get("/docs/search", response_model=SearchResponse)
+def docs_search(
+    query: str,
+    page_size: int = 15,
+    page_token: str | None = None,
+) -> SearchResponse:
+    """搜索飞书文档（docx/wiki/sheet），返回规整结果 + 分页。"""
+    if not query.strip():
+        raise HTTPException(status_code=400, detail="query 不能为空")
+    try:
+        res = search_docs(query, page_size=page_size, page_token=page_token)
+    except LarkError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return SearchResponse(
+        results=[
+            SearchItemOut(
+                url=it.url,
+                title=it.title,
+                summary=it.summary,
+                owner=it.owner,
+                updated_at=it.updated_at,
+                doc_type=it.doc_type,
+                entity_type=it.entity_type,
+            )
+            for it in res.items
+        ],
+        has_more=res.has_more,
+        page_token=res.page_token,
+    )
 
 
 class ExportRequest(BaseModel):
