@@ -19,6 +19,8 @@ const baseUrl = ref('')
 const model = ref('')
 const apiKey = ref('')
 const authToken = ref('')
+const thinkingEnabled = ref(false)
+const thinkingBudget = ref(8000)
 
 // 显示/隐藏切换
 const showApiKey = ref(false)
@@ -66,6 +68,8 @@ watch(
       model.value = cfg.model || ''
       apiKey.value = cfg.api_key || ''
       authToken.value = cfg.auth_token || ''
+      thinkingEnabled.value = !!cfg.thinking_enabled
+      thinkingBudget.value = cfg.thinking_budget ?? 8000
     } catch (e) {
       error.value = e.message
     } finally {
@@ -88,6 +92,8 @@ async function onSave() {
       model: model.value,
       api_key: apiKey.value === '' ? null : apiKey.value,
       auth_token: authToken.value === '' ? null : authToken.value,
+      thinking_enabled: thinkingEnabled.value,
+      thinking_budget: Number(thinkingBudget.value) || 0,
     }
     const cfg = await saveLlmSettings(patch)
     status.value = '已保存'
@@ -271,6 +277,55 @@ async function runTest() {
               <p class="text-[11px]" :style="{ color: 'var(--color-on-surface-variant)' }">
                 代理模式：填 Base URL + Auth Token；官方模式：填 API Key、Base URL 留空。
               </p>
+            </div>
+
+            <!-- 扩展思考（仅 API Key / 官方模式生效）-->
+            <div class="flex flex-col gap-1.5">
+              <div class="flex items-center justify-between">
+                <label class="text-[13px] font-medium" :style="{ color: 'var(--color-on-surface)' }">
+                  扩展思考
+                  <span :style="{ color: 'var(--color-on-surface-variant)' }" class="font-normal">
+                    （仅官方 API Key 模式生效；代理默认开思考）
+                  </span>
+                </label>
+                <button
+                  type="button"
+                  role="switch"
+                  :aria-checked="thinkingEnabled"
+                  class="relative w-10 h-6 rounded-full transition-colors shrink-0"
+                  :style="{
+                    background: thinkingEnabled
+                      ? 'var(--color-primary)'
+                      : 'var(--color-surface-container-high)',
+                  }"
+                  @click="thinkingEnabled = !thinkingEnabled"
+                >
+                  <span
+                    class="absolute top-0.5 left-0.5 w-5 h-5 rounded-full transition-transform"
+                    :style="{
+                      background: 'var(--color-surface)',
+                      transform: thinkingEnabled ? 'translateX(16px)' : 'translateX(0)',
+                    }"
+                  ></span>
+                </button>
+              </div>
+              <div v-if="thinkingEnabled" class="flex items-center gap-2">
+                <input
+                  v-model.number="thinkingBudget"
+                  type="number"
+                  min="1024"
+                  step="1024"
+                  class="w-28 px-3 py-1.5 text-sm border rounded focus:outline-none focus:ring-2"
+                  :style="{
+                    background: 'var(--color-surface-container-lowest)',
+                    borderColor: 'var(--color-outline-variant)',
+                    color: 'var(--color-on-surface)',
+                  }"
+                />
+                <span class="text-[12px]" :style="{ color: 'var(--color-on-surface-variant)' }">
+                  思考预算 tokens（须小于 max_tokens，agent 自动收紧）
+                </span>
+              </div>
             </div>
 
             <!-- 测试连接 -->

@@ -39,6 +39,9 @@ class RuntimeLLMConfig:
     api_key: str = os.environ.get("ANTHROPIC_API_KEY", "")
     auth_token: str = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
     model: str = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+    # 扩展思考（仅真 Anthropic Claude / api_key 模式生效；火山代理默认开思考、不认此参数）
+    thinking_enabled: bool = os.environ.get("ANTHROPIC_THINKING", "0") == "1"
+    thinking_budget: int = int(os.environ.get("ANTHROPIC_THINKING_BUDGET", "8000"))
 
 
 _runtime_llm = RuntimeLLMConfig()
@@ -55,6 +58,8 @@ def update_runtime_llm(
     api_key: str | None = None,
     auth_token: str | None = None,
     model: str | None = None,
+    thinking_enabled: bool | None = None,
+    thinking_budget: int | None = None,
 ) -> None:
     """部分更新运行时 LLM 配置；传 None 的字段保持不变（用于密码框留空=不改）。"""
     if base_url is not None:
@@ -65,3 +70,7 @@ def update_runtime_llm(
         _runtime_llm.auth_token = auth_token
     if model is not None:
         _runtime_llm.model = model
+    if thinking_enabled is not None:
+        _runtime_llm.thinking_enabled = thinking_enabled
+    if thinking_budget is not None:
+        _runtime_llm.thinking_budget = thinking_budget

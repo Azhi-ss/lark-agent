@@ -303,6 +303,8 @@ class LlmSettingsResponse(BaseModel):
     model: str
     api_key: str
     auth_token: str
+    thinking_enabled: bool
+    thinking_budget: int
 
 
 class LlmSettingsUpdate(BaseModel):
@@ -312,6 +314,8 @@ class LlmSettingsUpdate(BaseModel):
     api_key: str | None = None
     auth_token: str | None = None
     model: str | None = None
+    thinking_enabled: bool | None = None
+    thinking_budget: int | None = None
 
 
 def _llm_response() -> LlmSettingsResponse:
@@ -321,6 +325,8 @@ def _llm_response() -> LlmSettingsResponse:
         model=cfg.model,
         api_key=cfg.api_key,
         auth_token=cfg.auth_token,
+        thinking_enabled=cfg.thinking_enabled,
+        thinking_budget=cfg.thinking_budget,
     )
 
 
@@ -339,6 +345,8 @@ def update_llm_settings(req: LlmSettingsUpdate) -> LlmSettingsResponse:
         api_key=req.api_key,
         auth_token=req.auth_token,
         model=req.model,
+        thinking_enabled=req.thinking_enabled,
+        thinking_budget=req.thinking_budget,
     )
     return _llm_response()
 

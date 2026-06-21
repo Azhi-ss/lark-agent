@@ -139,6 +139,20 @@ def _make_client() -> anthropic.Anthropic:
     return anthropic.Anthropic(**kwargs)
 
 
+def _thinking_kwargs(max_tokens: int) -> dict[str, Any]:
+    """构建扩展思考参数；仅真 Anthropic Claude（api_key 模式）生效。
+
+    火山代理（glm-5.2 等）默认开启思考、不认 thinking 参数，故 auth_token 模式
+    返回空 dict，避免传参报错。
+    Anthropic 要求 max_tokens > budget_tokens，这里按 budget 收紧 max_tokens。
+    """
+    cfg = get_runtime_llm()
+    if not cfg.api_key or not cfg.thinking_enabled:
+        return {}
+    budget = max(1024, min(cfg.thinking_budget, max_tokens - 1024))
+    return {"thinking": {"type": "enabled", "budget_tokens": budget}}
+
+
 def run_agent(
     markdown: str,
     instruction: str,
@@ -154,6 +168,7 @@ def run_agent(
         system=SYSTEM_PROMPT,
         tools=[EDIT_TOOL],
         messages=[{"role": "user", "content": user_msg}],
+        **_thinking_kwargs(4096),
     )
 
     replacements: list[Replacement] = []
@@ -197,6 +212,7 @@ def run_agent_stream(
             system=SYSTEM_PROMPT,
             tools=[EDIT_TOOL],
             messages=[{"role": "user", "content": user_msg}],
+            **_thinking_kwargs(4096),
         ) as stream:
             replacements: list[Replacement] = []
             text_buf: list[str] = []
@@ -298,6 +314,7 @@ def run_solution_stream(
             system=SYSTEM_PROMPT_SOLUTION,
             tools=[PRODUCE_TOOL],
             messages=chat_messages,
+            **_thinking_kwargs(8192),
         ) as stream:
             text_buf: list[str] = []
             current_tool_input: dict[str, Any] = {}
