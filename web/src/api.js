@@ -46,6 +46,40 @@ export async function saveLlmSettings(patch) {
 }
 
 /**
+ * 用临时配置检测 LLM 连通性（不落库）。返回 {ok, latency_ms, error_type, detail}。
+ * @param {{base_url?:string, api_key?:string, auth_token?:string, model?:string}} cfg
+ */
+export async function testLlmSettings(cfg) {
+  const res = await fetch(`${BASE}/settings/llm/test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(cfg),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || `检测失败 (${res.status})`)
+  }
+  return res.json()
+}
+
+/**
+ * 搜索飞书文档（docx/wiki/sheet）。返回 {results, has_more, page_token}。
+ * @param {string} query 关键词
+ * @param {{page_size?:number, page_token?:string}} opts 分页
+ */
+export async function searchDocs(query, opts = {}) {
+  const params = new URLSearchParams({ query })
+  if (opts.page_size) params.set('page_size', String(opts.page_size))
+  if (opts.page_token) params.set('page_token', opts.page_token)
+  const res = await fetch(`${BASE}/docs/search?${params}`)
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || `搜索失败 (${res.status})`)
+  }
+  return res.json()
+}
+
+/**
  * 流式调用 agent，通过 SSE 接收事件。
  * @param {string} markdown
  * @param {string} instruction
