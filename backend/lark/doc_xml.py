@@ -14,6 +14,7 @@ import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
+from typing import Any
 
 # 飞书 docx 的顶层块标签
 _BLOCK_TAGS = {
@@ -60,7 +61,7 @@ def _text_of(elem: ET.Element) -> str:
 
 def _meta_of(elem: ET.Element) -> dict[str, str]:
     """提取关键属性到 meta。"""
-    keep = {"seq", "seq-level", "lang", "href", "name", "alt", "done"}
+    keep = {"seq", "seq-level", "lang", "href", "name", "alt", "done", "id"}
     return {k: v for k, v in elem.attrib.items() if k in keep}
 
 
@@ -129,6 +130,87 @@ def blocks_to_text(blocks: list[Block]) -> str:
         else:
             lines.append(b.text)
     return "\n".join(lines)
+
+
+def block_to_markdown(block: Block) -> str:
+    """把单个 Block 转为 markdown 片段（计划 §5.4）。
+
+    title/h1..h4 转对应井号；p 直接文本；ul/ol 转列表；pre 转围栏代码；
+    table 转 markdown 表格；figure/img/hr 转占位 markdown。复用 blocks_to_text 思路。
+    """
+    kind = block.kind
+    if kind == "title":
+        return f"# {block.text}"
+    if block.level:  # h1..h4
+        return f"{'#' * block.level} {block.text}"
+    if kind == "p":
+        return block.text
+    if kind in ("ul", "ol"):
+        lines: list[str] = []
+        for i, li in enumerate(block.children, 1):
+            prefix = f"{i}." if kind == "ol" else "-"
+            lines.append(f"{prefix} {li.text}")
+        return "\n".join(lines)
+    if kind == "pre":
+        lang = block.meta.get("lang", "")
+        header = f"```{lang}" if lang else "```"
+        return f"{header}\n{block.text}\n```"
+    if kind == "table":
+        return _table_to_markdown(block)
+    if kind in ("figure", "img"):
+        alt = block.meta.get("alt", "") or block.meta.get("name", "")
+        href = block.meta.get("href", "")
+        if href:
+            return f"![{alt}]({href})"
+        return f"[图片: {alt or block.text[:30]}]"
+    if kind == "hr":
+        return "---"
+    if kind == "bookmark":
+        return f"[书签: {block.meta.get('name', '')}]"
+    if kind == "cite":
+        return f"[引用文件: {block.meta.get('title', '')}]"
+    return block.text
+
+
+def _table_to_markdown(block: Block) -> str:
+    """把 table block 转为 markdown 表格（首行表头 + 分隔行）。
+
+    子 row 的 text 形如 "a | b"（_parse_block 用 " | " 连接单元格），
+    这里按 "|" 拆分还原单元格。
+    """
+    if not block.children:
+        return ""
+    rows = [child.text for child in block.children]
+    header_cells = [c.strip() for c in rows[0].split("|")]
+    lines = [f"| {' | '.join(header_cells)} |"]
+    lines.append(f"| {' | '.join(['---'] * len(header_cells))} |")
+    for row_text in rows[1:]:
+        cells = [c.strip() for c in row_text.split("|")]
+        lines.append(f"| {' | '.join(cells)} |")
+    return "\n".join(lines)
+
+
+def blocks_to_blocklist(content_xml: str) -> list[dict[str, Any]]:
+    """把飞书 docx XML 转成前端 Block 列表（计划 §3.1 契约）。
+
+    每个 block 输出 dict：block_id（取自 meta 的 id，无则空串）、kind、text、
+    markdown、original（与 markdown 同值）、level。
+    """
+    blocks = parse_xml(content_xml)
+    result: list[dict[str, Any]] = []
+    for b in blocks:
+        md = block_to_markdown(b)
+        result.append(
+            {
+                "block_id": b.meta.get("id", ""),
+                "kind": b.kind,
+                "text": b.text,
+                "markdown": md,
+                "original": md,
+                "level": b.level,
+            }
+        )
+    return result
 
 
 def diff_blocks(old: list[Block], new: list[Block]) -> list[DiffOp]:

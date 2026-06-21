@@ -115,11 +115,17 @@ export async function chatAgent(markdown, instruction, onEvent) {
   }
 }
 
-export async function applyEdits(url, replacements) {
+/**
+ * 按块写回飞书（block-level，带乐观锁）。
+ * @param {string} url 文档 URL
+ * @param {Array<{block_id:string, content:string}>} edits 待写回的块
+ * @param {number} revisionId 加载时的 revision_id，做乐观锁
+ */
+export async function applyEdits(url, edits, revisionId) {
   const res = await fetch(`${BASE}/doc/apply`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url, replacements, revision_id: -1 }),
+    body: JSON.stringify({ url, revision_id: revisionId, edits }),
   })
   return res.json()
 }

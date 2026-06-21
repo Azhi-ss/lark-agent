@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from backend.agent.agent import run_agent_stream, run_solution_stream
 from backend.config import get_runtime_llm, settings, update_runtime_llm
 from backend.lark.cli_wrapper import LarkError, fetch_doc, search_docs, update_doc
-from backend.lark.doc_xml import parse_xml
+from backend.lark.doc_xml import blocks_to_blocklist, parse_xml
 
 router = APIRouter()
 
@@ -48,6 +48,7 @@ class LoadResponse(BaseModel):
     revision_id: int
     markdown: str
     block_count: int
+    blocks: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ChatRequest(BaseModel):
@@ -61,26 +62,33 @@ class ReplacementItem(BaseModel):
     reason: str = ""
 
 
+class BlockEdit(BaseModel):
+    block_id: str
+    content: str
+
+
 class ApplyRequest(BaseModel):
     url: str
-    replacements: list[ReplacementItem]
+    replacements: list[ReplacementItem] = Field(default_factory=list)
     revision_id: int = -1
+    edits: list[BlockEdit] = Field(default_factory=list)
 
 
 @router.post("/doc/load", response_model=LoadResponse)
 def load_doc(req: LoadRequest) -> LoadResponse:
-    """加载飞书文档：返回 markdown（agent 用）+ block 数（前端用）。"""
+    """加载飞书文档：返回 markdown（agent 用）+ block 数 + blocks（逐块编辑用）。"""
     try:
         md = fetch_doc(req.url, doc_format="markdown")
-        xml = fetch_doc(req.url, doc_format="xml")
+        xml = fetch_doc(req.url, doc_format="xml", detail="with-ids")
     except LarkError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    blocks = parse_xml(xml.content_xml)
+    blocks = blocks_to_blocklist(xml.content_xml)
     return LoadResponse(
         document_id=md.document_id,
         revision_id=md.revision_id,
         markdown=md.content_xml,
         block_count=len(blocks),
+        blocks=blocks,
     )
 
 
@@ -126,9 +134,121 @@ async def agent_solution(req: SolutionRequest):
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
+def _is_revision_conflict(exc: LarkError) -> bool:
+    """启发式判断 LarkError 是否为 revision_id 版本冲突。
+
+    lark-cli 未暴露稳定的冲突错误码，按 message/raw 中的关键词判定。
+    """
+    blob = str(exc)
+    if exc.raw:
+        blob += " " + json.dumps(exc.raw, ensure_ascii=False)
+    lowered = blob.lower()
+    return any(kw in lowered for kw in ("revision", "版本", "conflict", "stale"))
+
+
+def _extract_revision_id(data: dict[str, Any], fallback: int) -> int:
+    """从 update_doc 返回数据中取新 revision_id，取不到则回退 fallback。"""
+    doc = data.get("document") if isinstance(data, dict) else None
+    if isinstance(doc, dict):
+        try:
+            return int(doc.get("revision_id", fallback))
+        except (TypeError, ValueError):
+            return fallback
+    return fallback
+
+
+def _apply_block_edits(req: ApplyRequest) -> dict[str, Any]:
+    """block_replace 串行 + 乐观锁（计划 §5.3）。
+
+    cur_rev 从 req.revision_id 开始，每次用 update_doc 返回的新 revision_id 更新；
+    版本冲突则标记 conflict 并中断后续。
+    """
+    if not settings.writeback_enabled:
+        return {
+            "ok": True,
+            "mode": "block_replace",
+            "simulated": True,
+            "final_revision_id": req.revision_id,
+            "conflict": False,
+            "count": len(req.edits),
+            "results": [
+                {"block_id": e.block_id, "ok": True, "new_revision_id": req.revision_id}
+                for e in req.edits
+            ],
+        }
+
+    # 写前乐观锁校验：飞书 block_replace 对过期 revision_id 静默不写且不报错，
+    # 无法依赖其返回值判断冲突，故写前显式 fetch 当前版本比对。
+    # （联调实测：过期 revision_id 写回返回 ok 但 revision 不递增、内容不变。）
+    try:
+        current = fetch_doc(req.url, doc_format="markdown")
+    except LarkError as exc:
+        return {
+            "ok": False,
+            "mode": "block_replace",
+            "final_revision_id": req.revision_id,
+            "conflict": False,
+            "count": 0,
+            "results": [],
+            "error": f"校验文档版本失败: {exc}",
+        }
+    if current.revision_id != req.revision_id:
+        return {
+            "ok": False,
+            "mode": "block_replace",
+            "final_revision_id": current.revision_id,
+            "conflict": True,
+            "count": 0,
+            "results": [],
+            "message": "文档已被修改，请重新加载后再编辑",
+        }
+
+    cur_rev = req.revision_id
+    results: list[dict[str, Any]] = []
+    conflict = False
+    for e in req.edits:
+        try:
+            data = update_doc(
+                req.url,
+                command="block_replace",
+                block_id=e.block_id,
+                content=e.content,
+                doc_format="markdown",
+                revision_id=cur_rev,
+            )
+            new_rev = _extract_revision_id(data, cur_rev)
+            results.append({"block_id": e.block_id, "ok": True, "new_revision_id": new_rev})
+            cur_rev = new_rev
+        except LarkError as exc:
+            is_conflict = _is_revision_conflict(exc)
+            results.append(
+                {
+                    "block_id": e.block_id,
+                    "ok": False,
+                    "error": str(exc),
+                    "raw": exc.raw,
+                    "conflict": is_conflict,
+                }
+            )
+            if is_conflict:
+                conflict = True
+                break
+    return {
+        "ok": all(r["ok"] for r in results) and not conflict,
+        "mode": "block_replace",
+        "final_revision_id": cur_rev,
+        "conflict": conflict,
+        "count": len(results),
+        "results": results,
+    }
+
+
 @router.post("/doc/apply")
 def apply_edits(req: ApplyRequest) -> dict[str, Any]:
-    """把 replacements 逐个作为 markdown str_replace 写回飞书。"""
+    """写回飞书：优先 block-level edits（block_replace + 乐观锁），否则降级 str_replace。"""
+    if req.edits:
+        return _apply_block_edits(req)
+
     if not settings.writeback_enabled:
         return {"simulated": True, "count": len(req.replacements), "results": []}
 

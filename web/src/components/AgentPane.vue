@@ -1,5 +1,5 @@
 <script setup>
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 
 const props = defineProps({
   loaded: { type: Boolean, required: true },
@@ -8,19 +8,49 @@ const props = defineProps({
   agentText: { type: String, default: '' },
   agentThinking: { type: String, default: '' },
   replacements: { type: Array, default: () => [] },
+  replacementLocations: { type: Array, default: () => [] },
 })
-const emit = defineEmits([
-  'update:instruction',
-  'chat',
-  'quick-action',
-  'reject',
-  'accept',
-])
+const emit = defineEmits(['update:instruction', 'chat', 'quick-action', 'locate'])
 
 const thinkingOpen = ref(false)
+const copiedIdx = ref(-1)
 
 function quick(text) {
   emit('quick-action', text)
+}
+
+// 已定位到某 block 的建议：显示摘要 + 「定位到文档」
+const located = computed(() =>
+  props.replacements
+    .map((r, i) => ({ ...r, blockId: props.replacementLocations[i] ?? null }))
+    .filter((x) => x.blockId !== null && x.blockId !== undefined)
+)
+
+// 无法自动定位的建议：单独分组，提示手动应用 + 复制内容
+const unlocated = computed(() =>
+  props.replacements.filter((_, i) => props.replacementLocations[i] == null)
+)
+
+function locate(blockId) {
+  emit('locate', blockId)
+}
+
+function copyContent(text, i) {
+  if (!navigator.clipboard) return
+  navigator.clipboard
+    .writeText(text)
+    .then(() => {
+      copiedIdx.value = i
+      window.setTimeout(() => {
+        if (copiedIdx.value === i) copiedIdx.value = -1
+      }, 1500)
+    })
+    .catch(() => {})
+}
+
+function truncate(s, n) {
+  if (!s) return ''
+  return s.length > n ? s.slice(0, n) + '…' : s
 }
 </script>
 
@@ -199,14 +229,15 @@ function quick(text) {
         </div>
       </div>
 
-      <!-- Diff Cards -->
+      <!-- 建议摘要列表（已定位 + 未定位分组） -->
       <div
         v-if="replacements.length > 0"
-        class="flex flex-col gap-4 mt-2 pl-11"
+        class="flex flex-col gap-3 mt-2 pl-11"
       >
+        <!-- 已定位：摘要 + 定位到文档 -->
         <div
-          v-for="(r, i) in replacements"
-          :key="i"
+          v-for="(r, i) in located"
+          :key="'loc-' + i"
           class="rounded-lg overflow-hidden fade-in"
           :style="{
             background: 'var(--color-surface)',
@@ -214,88 +245,112 @@ function quick(text) {
             boxShadow: '0 4px 12px rgba(99, 14, 212, 0.06)',
           }"
         >
-          <!-- header -->
           <div
-            class="px-4 py-3 flex items-center justify-between"
+            class="px-4 py-2.5 flex items-center gap-2"
             :style="{
               background: 'rgba(124, 58, 237, 0.05)',
               borderBottom: '1px solid var(--color-outline-variant)',
             }"
           >
-            <div class="flex items-center gap-2">
-              <span
-                class="material-symbols-outlined text-[18px]"
-                :style="{ color: 'var(--color-primary)' }"
-                >edit_note</span
-              >
-              <h4
-                class="font-semibold text-[16px]"
-                style="font-family: 'Hanken Grotesk', sans-serif"
-                :style="{ color: 'var(--color-on-surface)' }"
-              >
-                修改建议 #{{ i + 1 }}
-              </h4>
-            </div>
             <span
-              v-if="r.reason"
-              class="px-2 py-0.5 rounded-sm border text-[11px] uppercase font-bold tracking-wider"
-              :style="{
-                background: 'rgba(99, 14, 212, 0.1)',
-                color: 'var(--color-primary)',
-                borderColor: 'rgba(99, 14, 212, 0.2)',
-              }"
+              class="material-symbols-outlined text-[18px]"
+              :style="{ color: 'var(--color-primary)' }"
+              >edit_note</span
             >
-              {{ r.reason }}
-            </span>
+            <span
+              class="text-[13px] font-semibold truncate"
+              :style="{ color: 'var(--color-on-surface)' }"
+              >{{ r.reason || '修改建议' }}</span
+            >
           </div>
-
-          <!-- diff -->
           <div
-            class="p-4 leading-relaxed"
-            style="
-              font-family: 'JetBrains Mono', ui-monospace, monospace;
-              font-size: 13px;
-            "
+            class="px-4 py-2 text-[12px]"
+            style="font-family: 'JetBrains Mono', ui-monospace, monospace"
+            :style="{ color: 'var(--color-on-surface-variant)' }"
           >
-            <div class="diff-removed p-2 rounded mb-2 flex items-start gap-2">
-              <span class="material-symbols-outlined text-[16px] mt-0.5 shrink-0"
-                >remove</span
-              >
-              <pre class="whitespace-pre-wrap flex-1 m-0 font-mono">{{ r.pattern }}</pre>
-            </div>
-            <div class="diff-added p-2 rounded flex items-start gap-2">
-              <span class="material-symbols-outlined text-[16px] mt-0.5 shrink-0"
-                >add</span
-              >
-              <pre class="whitespace-pre-wrap flex-1 m-0 font-mono">{{ r.content }}</pre>
-            </div>
+            匹配片段：{{ truncate(r.pattern, 80) }}
           </div>
-
-          <!-- actions -->
           <div
-            class="px-4 py-3 flex justify-end gap-2"
+            class="px-4 py-2.5 flex justify-end"
             :style="{
               background: 'var(--color-surface-container-lowest)',
               borderTop: '1px solid var(--color-outline-variant)',
             }"
           >
             <button
-              @click="$emit('reject', i)"
-              class="px-3 py-1 rounded transition-colors text-[13px] hover:bg-[var(--color-surface-variant)]"
-              :style="{ color: 'var(--color-on-surface-variant)' }"
-            >
-              拒绝
-            </button>
-            <button
-              @click="$emit('accept', i)"
-              class="px-3 py-1 rounded transition-colors text-[13px]"
+              @click="locate(r.blockId)"
+              class="px-3 py-1 rounded transition-colors text-[13px] flex items-center gap-1"
               :style="{
                 background: 'var(--color-primary)',
                 color: 'var(--color-on-primary)',
               }"
             >
-              保留
+              <span class="material-symbols-outlined text-[16px]">my_location</span>
+              定位到文档
             </button>
+          </div>
+        </div>
+
+        <!-- 未定位：单独分组，提示手动应用 + 复制内容 -->
+        <div v-if="unlocated.length > 0" class="mt-2">
+          <div
+            class="px-3 py-2 rounded-t-lg flex items-center gap-2 text-[13px] font-semibold"
+            :style="{
+              background: 'var(--color-surface-container)',
+              color: 'var(--color-on-surface-variant)',
+              borderBottom: '1px solid var(--color-outline-variant)',
+            }"
+          >
+            <span class="material-symbols-outlined text-[18px]">help_outline</span>
+            {{ unlocated.length }} 条建议无法自动定位，请手动应用
+          </div>
+          <div class="flex flex-col gap-3 mt-3">
+            <div
+              v-for="(r, i) in unlocated"
+              :key="'un-' + i"
+              class="rounded-lg overflow-hidden fade-in"
+              :style="{
+                background: 'var(--color-surface)',
+                border: '1px solid var(--color-outline-variant)',
+              }"
+            >
+              <div
+                class="px-4 py-2.5 flex items-center gap-2"
+                :style="{ borderBottom: '1px solid var(--color-outline-variant)' }"
+              >
+                <span
+                  class="material-symbols-outlined text-[18px]"
+                  :style="{ color: 'var(--color-on-surface-variant)' }"
+                  >edit_note</span
+                >
+                <span
+                  class="text-[13px] font-semibold truncate"
+                  :style="{ color: 'var(--color-on-surface)' }"
+                  >{{ r.reason || '修改建议' }}</span
+                >
+              </div>
+              <pre
+                class="m-0 px-4 py-3 text-[12px] whitespace-pre-wrap"
+                style="font-family: 'JetBrains Mono', ui-monospace, monospace"
+                :style="{ color: 'var(--color-on-surface)' }"
+              >{{ r.content }}</pre>
+              <div
+                class="px-4 py-2.5 flex justify-end"
+                :style="{ background: 'var(--color-surface-container-lowest)' }"
+              >
+                <button
+                  @click="copyContent(r.content, i)"
+                  class="px-3 py-1 rounded transition-colors text-[13px] flex items-center gap-1"
+                  :style="{
+                    background: copiedIdx === i ? 'var(--color-success-surface)' : 'var(--color-surface-container-high)',
+                    color: copiedIdx === i ? 'var(--color-success-text)' : 'var(--color-on-surface-variant)',
+                  }"
+                >
+                  <span class="material-symbols-outlined text-[16px]">content_copy</span>
+                  {{ copiedIdx === i ? '已复制' : '复制内容' }}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       </div>

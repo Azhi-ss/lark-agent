@@ -1,6 +1,6 @@
 <script setup>
 defineProps({
-  replacementsCount: { type: Number, default: 0 },
+  pendingCount: { type: Number, default: 0 },
   applyStatus: { type: String, default: '' },
   applying: { type: Boolean, default: false },
 })
@@ -56,7 +56,7 @@ defineEmits(['apply'])
       </div>
       <button
         @click="$emit('apply')"
-        :disabled="replacementsCount === 0 || applying"
+        :disabled="pendingCount === 0 || applying"
         class="px-6 py-2.5 rounded-lg text-sm font-medium shadow-sm transition-colors flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
         :style="{
           background: 'var(--color-secondary)',
@@ -64,7 +64,7 @@ defineEmits(['apply'])
         }"
       >
         <span class="material-symbols-outlined">sync</span>
-        确认并写回飞书<span v-if="replacementsCount > 0">（{{ replacementsCount }} 处）</span>
+        确认并写回飞书<span v-if="pendingCount > 0">（{{ pendingCount }} 块）</span>
       </button>
     </div>
   </footer>

@@ -30,6 +30,7 @@ function onImportToEditor(urls) {
 
 const docUrl = ref('https://dptechnology.feishu.cn/wiki/OWAIwHYLJiyEHjkJvRAcEmKnn7y')
 const markdown = ref('')
+const blocks = ref([])
 const docMeta = ref({ document_id: '', revision_id: 0, block_count: 0 })
 const loading = ref(false)
 const loadError = ref('')
@@ -38,18 +39,25 @@ const instruction = ref('提炼本周（最近一篇）核心要点，在文末�
 const agentText = ref('')
 const agentThinking = ref('')
 const replacements = ref([])
+// 每个 replacement 定位到的 block_id（无法定位为 null）；用于 AgentPane 摘要分组
+const replacementLocations = ref([])
 const running = ref(false)
 const applyStatus = ref('')
 const applying = ref(false)
 
+const docPaneRef = ref(null)
+
 const loaded = computed(() => markdown.value.length > 0)
+const editedCount = computed(() => blocks.value.filter((b) => b.edited).length)
 
 async function onLoad() {
   if (loading.value) return
   loading.value = true
   loadError.value = ''
   markdown.value = ''
+  blocks.value = []
   replacements.value = []
+  replacementLocations.value = []
   agentText.value = ''
   agentThinking.value = ''
   applyStatus.value = ''
@@ -61,11 +69,37 @@ async function onLoad() {
       revision_id: data.revision_id,
       block_count: data.block_count,
     }
+    // 后端契约 §3.1：blocks 数组。map 成前端可编辑结构（edited:false, suggestion:null）。
+    blocks.value = (data.blocks || []).map((b) => ({
+      block_id: b.block_id ?? '',
+      kind: b.kind,
+      text: b.text ?? '',
+      markdown: b.markdown ?? '',
+      original: b.original ?? b.markdown ?? '',
+      level: b.level ?? 0,
+      edited: false,
+      suggestion: null,
+    }))
   } catch (e) {
     loadError.value = e.message
   } finally {
     loading.value = false
   }
+}
+
+// §5.1 pattern -> block_id 定位：先精确子串，后归一化去空白
+function locateBlock(pattern) {
+  if (!pattern) return null
+  for (const b of blocks.value) {
+    if (b.markdown.includes(pattern)) return b.block_id
+  }
+  const norm = (s) => s.replace(/\s+/g, '')
+  const np = norm(pattern)
+  if (!np) return null
+  for (const b of blocks.value) {
+    if (norm(b.markdown).includes(np)) return b.block_id
+  }
+  return null
 }
 
 async function onChat() {
@@ -74,6 +108,7 @@ async function onChat() {
   agentText.value = ''
   agentThinking.value = ''
   replacements.value = []
+  replacementLocations.value = []
   applyStatus.value = ''
   try {
     await chatAgent(markdown.value, instruction.value, (ev) => {
@@ -82,7 +117,20 @@ async function onChat() {
       } else if (ev.type === 'text') {
         agentText.value += ev.data.text
       } else if (ev.type === 'done') {
-        replacements.value = ev.data.replacements || []
+        const reps = ev.data.replacements || []
+        replacements.value = reps
+        // 清掉旧 suggestion，重新按 pattern 定位挂载
+        for (const b of blocks.value) b.suggestion = null
+        const locs = reps.map((r) => locateBlock(r.pattern))
+        replacementLocations.value = locs
+        reps.forEach((r, i) => {
+          const bid = locs[i]
+          if (bid === null || bid === undefined) return
+          const blk = blocks.value.find((b) => b.block_id === bid)
+          if (blk) {
+            blk.suggestion = { content: r.content, reason: r.reason || '', state: 'pending' }
+          }
+        })
       } else if (ev.type === 'error') {
         applyStatus.value = '错误: ' + ev.data.message
       }
@@ -94,16 +142,68 @@ async function onChat() {
   }
 }
 
+function findBlock(blockId) {
+  return blocks.value.find((b) => b.block_id === blockId)
+}
+
+// §5.2 接受/拒绝/手编/还原语义
+function acceptSuggestion(blockId) {
+  const b = findBlock(blockId)
+  if (!b || !b.suggestion) return
+  b.markdown = b.suggestion.content
+  b.edited = true
+  b.suggestion.state = 'accepted'
+}
+
+function rejectSuggestion(blockId) {
+  const b = findBlock(blockId)
+  if (!b || !b.suggestion) return
+  b.suggestion.state = 'rejected'
+}
+
+function editBlock(blockId, newMarkdown) {
+  const b = findBlock(blockId)
+  if (!b) return
+  b.markdown = newMarkdown
+  b.edited = true
+}
+
+function resetBlock(blockId) {
+  const b = findBlock(blockId)
+  if (!b) return
+  b.markdown = b.original
+  b.edited = false
+  b.suggestion = null
+}
+
 async function onApply() {
-  if (replacements.value.length === 0 || applying.value) return
+  const edited = blocks.value.filter((b) => b.edited)
+  if (edited.length === 0 || applying.value) return
   applying.value = true
   applyStatus.value = '写回中...'
   try {
-    const res = await applyEdits(docUrl.value, replacements.value)
-    applyStatus.value = res.ok
-      ? `已写回飞书（${res.count} 处）`
-      : `部分失败：${res.results.filter((r) => !r.ok).length} 处`
-    if (res.ok) replacements.value = []
+    const edits = edited.map((b) => ({ block_id: b.block_id, content: b.markdown }))
+    const res = await applyEdits(docUrl.value, edits, docMeta.value.revision_id)
+    if (res.conflict) {
+      applyStatus.value = '文档已被修改，请重新加载'
+    } else if (res.ok) {
+      applyStatus.value = `已写回飞书（${res.count ?? edited.length} 块）`
+      // 清 edited 标记，并把 original 推进到刚写回的内容（还原以新基线为准）
+      for (const b of edited) {
+        b.edited = false
+        b.original = b.markdown
+      }
+      // 已接受的建议已落库，清掉卡片
+      for (const b of blocks.value) {
+        if (b.suggestion && b.suggestion.state === 'accepted') b.suggestion = null
+      }
+      if (res.final_revision_id) {
+        docMeta.value = { ...docMeta.value, revision_id: res.final_revision_id }
+      }
+    } else {
+      const failed = (res.results || []).filter((r) => !r.ok).length
+      applyStatus.value = `部分失败：${failed} 块`
+    }
   } catch (e) {
     applyStatus.value = '写回失败: ' + e.message
   } finally {
@@ -111,16 +211,13 @@ async function onApply() {
   }
 }
 
+function onLocate(blockId) {
+  if (blockId === null || blockId === undefined) return
+  docPaneRef.value?.scrollToBlock(blockId)
+}
+
 function onQuickAction(text) {
   instruction.value = text
-}
-
-function onReject(i) {
-  replacements.value = replacements.value.filter((_, idx) => idx !== i)
-}
-
-function onAccept(_i) {
-  // 单条接受暂不处理（写回是批量动作）；保留卡片以便最终统一写回
 }
 
 function onOpenExternal() {
@@ -128,74 +225,6 @@ function onOpenExternal() {
     window.open(docUrl.value, '_blank', 'noopener')
   }
 }
-
-// 简易 markdown 渲染（保留原实现）
-function renderMd(src) {
-  if (!src) return ''
-  const esc = (s) =>
-    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  const lines = esc(src).split('\n')
-  let html = ''
-  let inCode = false
-  let inUl = false
-  let inOl = false
-  const inline = (s) =>
-    s
-      .replace(/`([^`]+)`/g, '<code>$1</code>')
-      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-  for (let line of lines) {
-    if (line.startsWith('```')) {
-      if (inCode) {
-        html += '</code></pre>'
-        inCode = false
-      } else {
-        if (inUl) { html += '</ul>'; inUl = false }
-        if (inOl) { html += '</ol>'; inOl = false }
-        html += '<pre><code>'
-        inCode = true
-      }
-      continue
-    }
-    if (inCode) {
-      html += line + '\n'
-      continue
-    }
-    if (/^###\s/.test(line)) {
-      if (inUl) { html += '</ul>'; inUl = false }
-      if (inOl) { html += '</ol>'; inOl = false }
-      html += `<h3>${inline(line.replace(/^###\s/, ''))}</h3>`
-    } else if (/^##\s/.test(line)) {
-      if (inUl) { html += '</ul>'; inUl = false }
-      if (inOl) { html += '</ol>'; inOl = false }
-      html += `<h2>${inline(line.replace(/^##\s/, ''))}</h2>`
-    } else if (/^#\s/.test(line)) {
-      if (inUl) { html += '</ul>'; inUl = false }
-      if (inOl) { html += '</ol>'; inOl = false }
-      html += `<h1>${inline(line.replace(/^#\s/, ''))}</h1>`
-    } else if (/^[-*]\s/.test(line)) {
-      if (inOl) { html += '</ol>'; inOl = false }
-      if (!inUl) { html += '<ul>'; inUl = true }
-      html += `<li>${inline(line.replace(/^[-*]\s/, ''))}</li>`
-    } else if (/^\d+\.\s/.test(line)) {
-      if (inUl) { html += '</ul>'; inUl = false }
-      if (!inOl) { html += '<ol>'; inOl = true }
-      html += `<li>${inline(line.replace(/^\d+\.\s/, ''))}</li>`
-    } else if (line.trim() === '') {
-      if (inUl) { html += '</ul>'; inUl = false }
-      if (inOl) { html += '</ol>'; inOl = false }
-    } else {
-      if (inUl) { html += '</ul>'; inUl = false }
-      if (inOl) { html += '</ol>'; inOl = false }
-      html += `<p>${inline(line)}</p>`
-    }
-  }
-  if (inUl) html += '</ul>'
-  if (inOl) html += '</ol>'
-  if (inCode) html += '</code></pre>'
-  return html
-}
-
-const markdownHtml = computed(() => renderMd(markdown.value))
 </script>
 
 <template>
@@ -264,11 +293,16 @@ const markdownHtml = computed(() => renderMd(markdown.value))
         class="flex-1 flex overflow-hidden"
       >
         <DocPane
+          ref="docPaneRef"
           :loaded="loaded"
           :doc-meta="docMeta"
-          :markdown-html="markdownHtml"
+          :blocks="blocks"
           :load-error="loadError"
           @open-external="onOpenExternal"
+          @accept-suggestion="acceptSuggestion"
+          @reject-suggestion="rejectSuggestion"
+          @reset-block="resetBlock"
+          @edit-block="editBlock"
         />
         <AgentPane
           :loaded="loaded"
@@ -277,11 +311,11 @@ const markdownHtml = computed(() => renderMd(markdown.value))
           :agent-text="agentText"
           :agent-thinking="agentThinking"
           :replacements="replacements"
+          :replacement-locations="replacementLocations"
           @update:instruction="instruction = $event"
           @chat="onChat"
           @quick-action="onQuickAction"
-          @reject="onReject"
-          @accept="onAccept"
+          @locate="onLocate"
         />
       </main>
       <WorkspaceView v-else key="workspace" />
@@ -289,7 +323,7 @@ const markdownHtml = computed(() => renderMd(markdown.value))
 
     <AppFooter
       v-if="activeMode === 'editor'"
-      :replacements-count="replacements.length"
+      :pending-count="editedCount"
       :apply-status="applyStatus"
       :applying="applying"
       @apply="onApply"

@@ -63,12 +63,19 @@ def _run(args: list[str]) -> dict[str, Any]:
     return payload
 
 
-def fetch_doc(doc_ref: str, *, doc_format: str = "xml") -> FetchResult:
+def fetch_doc(
+    doc_ref: str,
+    *,
+    doc_format: str = "xml",
+    detail: str = "simple",
+) -> FetchResult:
     """读取飞书文档，返回内容与版本。
 
     Args:
         doc_ref: 文档 URL（自动推断 docx/wiki 类型）或 token。
         doc_format: xml（默认，含 block 结构）或 markdown（纯文本，str_replace 友好）。
+        detail: 细节级别 simple（默认）/ with-ids（block 带 id）/ full（含样式）。
+            非 simple 时透传 --detail；默认 simple 保持向后兼容。
     """
     args = [
         settings.lark_cli, "docs", "+fetch",
@@ -77,6 +84,8 @@ def fetch_doc(doc_ref: str, *, doc_format: str = "xml") -> FetchResult:
         "--doc", doc_ref,
         "--doc-format", doc_format,
     ]
+    if detail != "simple":
+        args += ["--detail", detail]
     payload = _run(args)
     doc = payload["data"]["document"]
     return FetchResult(
