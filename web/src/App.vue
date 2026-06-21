@@ -311,14 +311,14 @@ const markdownHtml = computed(() => renderMd(markdown.value))
         @click.self="searchOpen = false"
       >
         <div
-          class="w-[560px] max-w-[92vw] rounded-xl shadow-2xl overflow-hidden"
+          class="w-[560px] max-w-[92vw] max-h-[80vh] rounded-xl shadow-2xl overflow-hidden flex flex-col"
           :style="{
             background: 'var(--color-surface)',
             border: '1px solid var(--color-outline-variant)',
           }"
         >
           <div
-            class="px-6 py-4 flex items-center justify-between border-b"
+            class="px-6 py-4 flex items-center justify-between border-b shrink-0"
             :style="{ borderColor: 'var(--color-outline-variant)' }"
           >
             <h3
@@ -338,7 +338,7 @@ const markdownHtml = computed(() => renderMd(markdown.value))
               <span class="material-symbols-outlined">close</span>
             </button>
           </div>
-          <div class="p-4">
+          <div class="p-4 flex-1 min-h-0 overflow-hidden flex flex-col">
             <DocSearchPanel @import="onImportToEditor" />
           </div>
         </div>

@@ -276,13 +276,22 @@ function onClearChat() {
         </p>
       </div>
 
-      <!-- 搜索导入 -->
-      <div class="px-4 py-3 shrink-0 border-b" :style="{ borderColor: 'var(--color-outline-variant)' }">
-        <div class="flex items-center gap-1 mb-2">
+      <!-- 搜索导入：max-h 限高 + 内部 flex 列布局，避免撑破侧栏 -->
+      <div
+        class="px-4 py-3 border-b flex flex-col min-h-0"
+        :style="{
+          borderColor: 'var(--color-outline-variant)',
+          maxHeight: '42vh',
+          minHeight: '200px',
+        }"
+      >
+        <div class="flex items-center gap-1 mb-2 shrink-0">
           <span class="material-symbols-outlined text-[15px]" :style="{ color: 'var(--color-primary)' }">search</span>
           <span class="text-[12px] font-medium" :style="{ color: 'var(--color-on-surface-variant)' }">搜索导入</span>
         </div>
-        <DocSearchPanel compact @import="onImportFromSearch" />
+        <div class="flex-1 min-h-0 flex flex-col">
+          <DocSearchPanel compact @import="onImportFromSearch" />
+        </div>
       </div>
 
       <!-- 文档列表 -->
