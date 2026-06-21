@@ -123,7 +123,6 @@ def search_docs(
     """
     args = [
         settings.lark_cli, "docs", "+search",
-        "--api-version", settings.api_version,
         "--as", settings.lark_as,
         "--query", query,
         "--page-size", str(page_size),
