@@ -136,18 +136,16 @@ def _reset_llm(**kwargs):
     )
 
 
-def test_get_llm_settings_returns_contract_and_masks_secrets():
-    """GET /api/settings/llm 返回 base_url/model 明文,api_key/auth_token 只回布尔。"""
+def test_get_llm_settings_returns_plaintext_keys():
+    """GET /api/settings/llm 返回 base_url/model/api_key/auth_token 明文。"""
     _reset_llm(base_url="https://proxy.example.com", api_key="sk-secret", model="m1")
     resp = client.get("/api/settings/llm")
     assert resp.status_code == 200
     body = resp.json()
     assert body["base_url"] == "https://proxy.example.com"
     assert body["model"] == "m1"
-    assert body["has_api_key"] is True
-    assert body["has_auth_token"] is False
-    # 不应泄漏明文密钥
-    assert "sk-secret" not in resp.text
+    assert body["api_key"] == "sk-secret"
+    assert body["auth_token"] == ""
 
 
 def test_update_llm_settings_overwrites_base_url_and_model():
@@ -167,18 +165,18 @@ def test_update_llm_settings_overwrites_base_url_and_model():
 
 
 def test_update_llm_settings_none_fields_keep_old_secret():
-    """密码框留空(传 None)时,原 api_key 保留,has_api_key 仍为 True。"""
+    """密码框留空(传 None)时,原 api_key 保留。"""
     _reset_llm(api_key="sk-keep")
     resp = client.post(
         "/api/settings/llm",
         json={"base_url": "https://x.example.com"},  # 不传 api_key
     )
     assert resp.status_code == 200
-    assert resp.json()["has_api_key"] is True  # 旧 key 仍在
+    assert resp.json()["api_key"] == "sk-keep"  # 旧 key 仍在
 
 
 def test_update_llm_settings_empty_string_clears_secret():
-    """显式传空串表示清空该凭证,has_* 应变 False。"""
+    """显式传空串表示清空该凭证。"""
     _reset_llm(api_key="sk-keep", auth_token="tok-keep")
     resp = client.post(
         "/api/settings/llm",
@@ -186,11 +184,132 @@ def test_update_llm_settings_empty_string_clears_secret():
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["has_api_key"] is False
-    assert body["has_auth_token"] is False
+    assert body["api_key"] == ""
+    assert body["auth_token"] == ""
 
 
 def test_health_reflects_runtime_model():
     """/api/health 的 model 取自运行时配置,改设置后 health 同步变化。"""
     _reset_llm(model="health-model-xyz")
     assert client.get("/api/health").json()["model"] == "health-model-xyz"
+
+
+# ===== LLM 连接检测端点（mock anthropic，避免真实调用） =====
+
+
+def _patch_anthropic(monkeypatch, *, create_side_effect=None):
+    """mock anthropic.Anthropic 类，让其 messages.create 触发指定副作用。
+
+    只替换 Anthropic 类本身，保留模块其余内容（异常类等）给 _classify_llm_error 用。
+    """
+    import anthropic
+
+    class _FakeMessages:
+        def __init__(self) -> None:
+            self.create = lambda *a, **kw: None
+
+    fake_messages = _FakeMessages()
+
+    class _FakeClient:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+            self.messages = fake_messages
+
+    if create_side_effect is not None:
+        fake_messages.create = create_side_effect  # type: ignore[assignment]
+    monkeypatch.setattr(anthropic, "Anthropic", _FakeClient)
+
+
+def test_llm_test_success_returns_ok_and_latency(monkeypatch):
+    """检测成功:返回 ok=True + latency_ms。"""
+    _patch_anthropic(monkeypatch)  # create 默认返回 None
+    resp = client.post(
+        "/api/settings/llm/test",
+        json={"base_url": "https://x.example.com", "auth_token": "tok", "model": "m1"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["latency_ms"] is not None
+    assert body["latency_ms"] >= 0
+
+
+def test_llm_test_failure_returns_ok_false(monkeypatch):
+    """create 抛异常 → ok=False,带 error_type 与 detail。"""
+    def raise_err(*a, **kw):
+        raise RuntimeError("boom")
+
+    _patch_anthropic(monkeypatch, create_side_effect=raise_err)
+    resp = client.post(
+        "/api/settings/llm/test",
+        json={"base_url": "https://x.example.com", "api_key": "bad", "model": "m1"},
+    )
+    body = resp.json()
+    assert body["ok"] is False
+    assert body["error_type"] == "unknown"
+    assert "boom" in body["detail"]
+
+
+# ----- _classify_llm_error 分类逻辑单测(用真实异常类) -----
+
+
+def _make_response(status: int):
+    """构造真实 httpx.Response,供 anthropic APIStatusError 子类使用。"""
+    import httpx
+
+    return httpx.Response(status_code=status, request=httpx.Request("POST", "https://x"))
+
+
+def test_classify_auth_error():
+    import anthropic
+
+    from backend.api.routes import _classify_llm_error
+
+    etype, _ = _classify_llm_error(
+        anthropic.AuthenticationError(message="bad key", response=_make_response(401), body=None)
+    )
+    assert etype == "auth"
+
+
+def test_classify_model_not_found_error():
+    import anthropic
+
+    from backend.api.routes import _classify_llm_error
+
+    etype, _ = _classify_llm_error(
+        anthropic.NotFoundError(message="no model", response=_make_response(404), body=None)
+    )
+    assert etype == "model"
+
+
+def test_classify_rate_limit_error():
+    import anthropic
+
+    from backend.api.routes import _classify_llm_error
+
+    etype, _ = _classify_llm_error(
+        anthropic.RateLimitError(message="slow down", response=_make_response(429), body=None)
+    )
+    assert etype == "rate_limit"
+
+
+def test_classify_network_timeout_error():
+    import anthropic
+
+    from backend.api.routes import _classify_llm_error
+
+    etype, _ = _classify_llm_error(anthropic.APITimeoutError(request=None))
+    assert etype == "network"
+
+
+def test_llm_test_does_not_persist_config(monkeypatch):
+    """检测用的临时配置不落库:运行时配置应不受影响。"""
+    _reset_llm(api_key="original-key", model="original-model")
+    _patch_anthropic(monkeypatch)
+    client.post(
+        "/api/settings/llm/test",
+        json={"base_url": "https://x.example.com", "api_key": "temp-key", "model": "temp-model"},
+    )
+    cfg = client.get("/api/settings/llm").json()
+    assert cfg["api_key"] == "original-key"
+    assert cfg["model"] == "original-model"

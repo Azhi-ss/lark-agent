@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import anthropic  # 模块级，便于测试 monkeypatch
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
@@ -165,12 +166,12 @@ def health() -> dict[str, Any]:
 
 
 class LlmSettingsResponse(BaseModel):
-    """LLM 接入配置；敏感字段只回布尔，不回明文。"""
+    """LLM 接入配置；按用户决策回明文，前端密码框默认遮罩、可切换显示。"""
 
     base_url: str
     model: str
-    has_api_key: bool
-    has_auth_token: bool
+    api_key: str
+    auth_token: str
 
 
 class LlmSettingsUpdate(BaseModel):
@@ -187,14 +188,14 @@ def _llm_response() -> LlmSettingsResponse:
     return LlmSettingsResponse(
         base_url=cfg.base_url,
         model=cfg.model,
-        has_api_key=bool(cfg.api_key),
-        has_auth_token=bool(cfg.auth_token),
+        api_key=cfg.api_key,
+        auth_token=cfg.auth_token,
     )
 
 
 @router.get("/settings/llm", response_model=LlmSettingsResponse)
 def get_llm_settings() -> LlmSettingsResponse:
-    """读取当前 LLM 接入配置（敏感字段脱敏）。"""
+    """读取当前 LLM 接入配置（含明文 key）。"""
     return _llm_response()
 
 
@@ -209,6 +210,87 @@ def update_llm_settings(req: LlmSettingsUpdate) -> LlmSettingsResponse:
         model=req.model,
     )
     return _llm_response()
+
+
+# ===== LLM 连接检测（临时配置，不落库） =====
+#
+# 检测用面板当前输入的配置临时构造 client，发一个 max_tokens=1 的真实推理请求，
+# 不修改运行时配置。失败按错误类型分类，延迟分级供前端着色。
+
+
+class LlmTestRequest(BaseModel):
+    """检测请求：用面板当前输入的配置临时测，不落库。"""
+
+    base_url: str = ""
+    api_key: str = ""
+    auth_token: str = ""
+    model: str = ""
+
+
+class LlmTestResponse(BaseModel):
+    """检测结果：ok + 延迟 + 错误分类 + 原始信息。"""
+
+    ok: bool
+    latency_ms: int | None = None
+    error_type: str | None = None  # network / auth / model / rate_limit / unknown
+    detail: str = ""
+
+
+def _classify_llm_error(exc: Exception) -> tuple[str, str]:
+    """把 anthropic 异常分类成 (error_type, detail)。"""
+    # 鉴权失败
+    if isinstance(exc, (anthropic.AuthenticationError, anthropic.PermissionDeniedError)):
+        return "auth", "鉴权失败，检查 API Key / Auth Token"
+    # 模型不存在 / 资源不存在
+    if isinstance(exc, anthropic.NotFoundError):
+        return "model", "模型名无效或端点不存在，检查 Model / Base URL"
+    # 限流
+    if isinstance(exc, anthropic.RateLimitError):
+        return "rate_limit", "触发限流，稍后重试"
+    # 网络/连接类：APITimeoutError、APIConnectionError
+    if isinstance(exc, (anthropic.APITimeoutError, anthropic.APIConnectionError)):
+        return "network", "网络不通或超时，检查 Base URL 与网络"
+    # 其它 API 错误
+    if isinstance(exc, anthropic.APIStatusError):
+        return "unknown", f"HTTP {exc.status_code}: {exc!s}"
+    return "unknown", str(exc)
+
+
+@router.post("/settings/llm/test", response_model=LlmTestResponse)
+def test_llm_settings(req: LlmTestRequest) -> LlmTestResponse:
+    """用临时配置检测 LLM 连通性，不落库。"""
+    import time
+
+    # 临时构造 client（不写回 get_runtime_llm）
+    kwargs: dict[str, Any] = {}
+    if req.api_key:
+        kwargs["api_key"] = req.api_key
+    else:
+        kwargs["auth_token"] = req.auth_token
+        kwargs["base_url"] = req.base_url
+    if req.base_url and "base_url" not in kwargs:
+        kwargs["base_url"] = req.base_url
+    # 10s 超时，避免慢代理挂死同步请求
+    kwargs["timeout"] = 10.0
+
+    try:
+        client = anthropic.Anthropic(**kwargs)
+    except Exception as exc:  # noqa: BLE001 - 构造失败统一分类
+        etype, detail = _classify_llm_error(exc)
+        return LlmTestResponse(ok=False, error_type=etype, detail=detail)
+
+    start = time.perf_counter()
+    try:
+        client.messages.create(
+            model=req.model or "claude-sonnet-4-6",
+            max_tokens=1,
+            messages=[{"role": "user", "content": "hi"}],
+        )
+    except Exception as exc:  # noqa: BLE001 - 推理失败统一分类
+        etype, detail = _classify_llm_error(exc)
+        return LlmTestResponse(ok=False, error_type=etype, detail=detail)
+    latency_ms = int((time.perf_counter() - start) * 1000)
+    return LlmTestResponse(ok=True, latency_ms=latency_ms)
 
 
 # ===== Phase 2 新增端点 =====
