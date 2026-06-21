@@ -6,6 +6,7 @@ import {
   exportMd,
   saveWorkspace,
 } from '../api.js'
+import DocSearchPanel from './DocSearchPanel.vue'
 
 /**
  * 方案构建模式：
@@ -63,6 +64,31 @@ async function onAddDoc() {
       })
       newUrl.value = ''
     }
+  } catch (e) {
+    addError.value = e.message
+  } finally {
+    adding.value = false
+  }
+}
+
+async function onImportFromSearch(urls) {
+  /**从搜索面板批量导入：复用 loadMany，单份失败不影响其它。*/
+  if (urls.length === 0 || adding.value) return
+  adding.value = true
+  addError.value = ''
+  try {
+    const res = await loadMany(urls)
+    let okCount = 0
+    for (const item of res.docs || []) {
+      if (item.error) continue
+      docs.value.push({
+        url: item.url,
+        markdown: item.markdown || '',
+        block_count: item.block_count || 0,
+      })
+      okCount += 1
+    }
+    if (okCount === 0) addError.value = '导入失败：未成功加载任何文档'
   } catch (e) {
     addError.value = e.message
   } finally {
@@ -248,6 +274,15 @@ function onClearChat() {
         >
           {{ addError }}
         </p>
+      </div>
+
+      <!-- 搜索导入 -->
+      <div class="px-4 py-3 shrink-0 border-b" :style="{ borderColor: 'var(--color-outline-variant)' }">
+        <div class="flex items-center gap-1 mb-2">
+          <span class="material-symbols-outlined text-[15px]" :style="{ color: 'var(--color-primary)' }">search</span>
+          <span class="text-[12px] font-medium" :style="{ color: 'var(--color-on-surface-variant)' }">搜索导入</span>
+        </div>
+        <DocSearchPanel compact @import="onImportFromSearch" />
       </div>
 
       <!-- 文档列表 -->

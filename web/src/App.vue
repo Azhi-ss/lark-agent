@@ -8,10 +8,25 @@ import AppFooter from './components/AppFooter.vue'
 import WorkspaceView from './components/WorkspaceView.vue'
 import SettingsModal from './components/SettingsModal.vue'
 import AboutModal from './components/AboutModal.vue'
+import DocSearchPanel from './components/DocSearchPanel.vue'
 
 const activeMode = ref('editor') // 'editor' | 'workspace'
 const settingsOpen = ref(false)
 const helpOpen = ref(false)
+const searchOpen = ref(false)
+
+// 单文档模式：搜索导入取第一份填 URL 并加载
+function onImportToEditor(urls) {
+  if (!urls || urls.length === 0) return
+  if (urls.length > 1) {
+    // 单文档模式仅导入第一份，提示用户
+    applyStatus.value = `单文档模式仅导入第一份（共选 ${urls.length} 份）`
+    setTimeout(() => (applyStatus.value = ''), 3000)
+  }
+  docUrl.value = urls[0]
+  searchOpen.value = false
+  onLoad()
+}
 
 const docUrl = ref('https://dptechnology.feishu.cn/wiki/OWAIwHYLJiyEHjkJvRAcEmKnn7y')
 const markdown = ref('')
@@ -191,6 +206,7 @@ const markdownHtml = computed(() => renderMd(markdown.value))
       @load="onLoad"
       @open-settings="settingsOpen = true"
       @open-help="helpOpen = true"
+      @open-search="searchOpen = true"
     >
       <template #tabs>
         <div
@@ -285,6 +301,49 @@ const markdownHtml = computed(() => renderMd(markdown.value))
       @saved="(cfg) => (settingsOpen = false)"
     />
     <AboutModal :open="helpOpen" @close="helpOpen = false" />
+
+    <!-- 搜索导入浮层（单文档编辑模式） -->
+    <Teleport to="body">
+      <div
+        v-if="searchOpen"
+        class="fixed inset-0 z-[100] flex items-start justify-center pt-20"
+        :style="{ background: 'rgba(0,0,0,0.4)' }"
+        @click.self="searchOpen = false"
+      >
+        <div
+          class="w-[560px] max-w-[92vw] rounded-xl shadow-2xl overflow-hidden"
+          :style="{
+            background: 'var(--color-surface)',
+            border: '1px solid var(--color-outline-variant)',
+          }"
+        >
+          <div
+            class="px-6 py-4 flex items-center justify-between border-b"
+            :style="{ borderColor: 'var(--color-outline-variant)' }"
+          >
+            <h3
+              class="text-lg font-semibold flex items-center gap-2"
+              style="font-family: 'Hanken Grotesk', sans-serif"
+              :style="{ color: 'var(--color-on-surface)' }"
+            >
+              <span class="material-symbols-outlined" :style="{ color: 'var(--color-primary)' }">search</span>
+              搜索飞书文档
+            </h3>
+            <button
+              aria-label="关闭"
+              class="p-1 rounded-full transition-colors hover:bg-[var(--color-surface-container-high)]"
+              :style="{ color: 'var(--color-on-surface-variant)' }"
+              @click="searchOpen = false"
+            >
+              <span class="material-symbols-outlined">close</span>
+            </button>
+          </div>
+          <div class="p-4">
+            <DocSearchPanel @import="onImportToEditor" />
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 

@@ -3,7 +3,7 @@ defineProps({
   modelValue: { type: String, required: true },
   loading: { type: Boolean, default: false },
 })
-defineEmits(['update:modelValue', 'load', 'open-settings', 'open-help'])
+defineEmits(['update:modelValue', 'load', 'open-settings', 'open-help', 'open-search'])
 </script>
 
 <template>
@@ -81,6 +81,13 @@ defineEmits(['update:modelValue', 'load', 'open-settings', 'open-help'])
       :style="{ color: 'var(--color-on-surface-variant)' }"
     >
       <slot name="tabs" />
+      <button
+        aria-label="搜索文档"
+        @click="$emit('open-search')"
+        class="p-2 rounded-full transition-colors hover:bg-[var(--color-surface-container-high)]"
+      >
+        <span class="material-symbols-outlined">search</span>
+      </button>
       <button
         aria-label="设置"
         @click="$emit('open-settings')"
