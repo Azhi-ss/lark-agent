@@ -208,14 +208,25 @@ def _apply_block_edits(req: ApplyRequest) -> dict[str, Any]:
     conflict = False
     for e in req.edits:
         try:
-            data = update_doc(
-                req.url,
-                command="block_replace",
-                block_id=e.block_id,
-                content=e.content,
-                doc_format="markdown",
-                revision_id=cur_rev,
-            )
+            # 空 content = 用户删除该 block 内容：block_replace 不接受空 content，
+            # 改用 block_delete（飞书语义：删除整块，非清空保留）。
+            if e.content == "":
+                data = update_doc(
+                    req.url,
+                    command="block_delete",
+                    block_id=e.block_id,
+                    doc_format="markdown",
+                    revision_id=cur_rev,
+                )
+            else:
+                data = update_doc(
+                    req.url,
+                    command="block_replace",
+                    block_id=e.block_id,
+                    content=e.content,
+                    doc_format="markdown",
+                    revision_id=cur_rev,
+                )
             new_rev = _extract_revision_id(data, cur_rev)
             results.append({"block_id": e.block_id, "ok": True, "new_revision_id": new_rev})
             cur_rev = new_rev

@@ -167,6 +167,43 @@ def test_apply_block_replace_rejects_on_revision_conflict(monkeypatch):
     assert update_calls == []  # 冲突时不应真正写回
 
 
+def test_apply_empty_content_uses_block_delete(monkeypatch):
+    """edits 中 content 为空串时改用 block_delete（block_replace 不接受空 content）。"""
+    monkeypatch.setattr(
+        "backend.api.routes.settings",
+        Settings(writeback_enabled=True),
+    )
+    calls: list[dict] = []
+
+    def fake_update_doc(
+        doc_ref, *, command, content="", pattern=None,
+        block_id=None, doc_format="xml", revision_id=-1,
+    ):
+        calls.append({"command": command, "block_id": block_id, "content": content})
+        return {"document": {"revision_id": 13}}
+
+    def fake_fetch(doc_ref, *, doc_format="xml"):
+        return FetchResult(document_id="fake", revision_id=12, content_xml="")
+
+    monkeypatch.setattr("backend.api.routes.update_doc", fake_update_doc)
+    monkeypatch.setattr("backend.api.routes.fetch_doc", fake_fetch)
+
+    resp = client.post(
+        "/api/doc/apply",
+        json={
+            "url": "https://example.feishu.cn/docx/fake",
+            "revision_id": 12,
+            "edits": [{"block_id": "blkcnA", "content": ""}],
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    # 空 content → block_delete，而非 block_replace
+    assert calls[0]["command"] == "block_delete"
+    assert calls[0]["block_id"] == "blkcnA"
+
+
 def test_apply_falls_back_to_str_replace_when_only_replacements(monkeypatch):
     """请求只带 replacements（无 edits）时降级走 str_replace 路径（兼容旧调用）。"""
     monkeypatch.setattr(
