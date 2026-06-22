@@ -7,6 +7,9 @@
 """
 from __future__ import annotations
 
+import io
+import zipfile
+
 from fastapi.testclient import TestClient
 
 from backend.config import Settings, update_runtime_llm
@@ -371,6 +374,93 @@ def test_export_markdown_downloads_attachment():
     assert "attachment" in resp.headers["content-disposition"]
     assert "weekly.md" in resp.headers["content-disposition"]
     assert resp.text == "# hi"
+
+
+def test_export_remote_doc_as_markdown_attachment(monkeypatch):
+    """/api/doc/export 支持按 url 拉取完整文档并导出为 markdown。"""
+    fake_xml = FetchResult(
+        document_id="doc123",
+        revision_id=5,
+        content_xml="<title>周报</title><h1>进展</h1><p>完成 A</p>",
+    )
+    calls: list[dict] = []
+
+    def fake_fetch(doc_ref: str, *, doc_format: str = "xml", detail: str = "simple"):
+        calls.append({"doc_ref": doc_ref, "doc_format": doc_format, "detail": detail})
+        return fake_xml
+
+    monkeypatch.setattr("backend.api.routes.fetch_doc", fake_fetch)
+
+    resp = client.post(
+        "/api/doc/export",
+        json={
+            "url": "https://example.feishu.cn/docx/fake",
+            "format": "md",
+            "filename": "weekly",
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/markdown")
+    assert "weekly.md" in resp.headers["content-disposition"]
+    assert resp.text == "# 周报\n\n# 进展\n\n完成 A"
+    assert calls == [
+        {
+            "doc_ref": "https://example.feishu.cn/docx/fake",
+            "doc_format": "xml",
+            "detail": "with-ids",
+        }
+    ]
+
+
+def test_export_remote_doc_as_docx_attachment(monkeypatch):
+    """/api/doc/export 支持按 url 拉取完整文档并导出为真实 docx。"""
+    fake_xml = FetchResult(
+        document_id="doc123",
+        revision_id=5,
+        content_xml="<title>周报</title><h1>进展</h1><p>完成 A</p>",
+    )
+
+    def fake_fetch(doc_ref: str, *, doc_format: str = "xml", detail: str = "simple"):
+        return fake_xml
+
+    monkeypatch.setattr("backend.api.routes.fetch_doc", fake_fetch)
+
+    resp = client.post(
+        "/api/doc/export",
+        json={
+            "url": "https://example.feishu.cn/docx/fake",
+            "format": "docx",
+            "filename": "weekly",
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    assert "weekly.docx" in resp.headers["content-disposition"]
+    assert resp.content.startswith(b"PK")
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        document_xml = zf.read("word/document.xml").decode("utf-8")
+    assert "周报" in document_xml
+    assert "进展" in document_xml
+    assert "完成 A" in document_xml
+
+
+def test_export_remote_doc_rejects_unsupported_format(monkeypatch):
+    """/api/doc/export 对不支持的导出格式返回 400。"""
+    resp = client.post(
+        "/api/doc/export",
+        json={
+            "url": "https://example.feishu.cn/docx/fake",
+            "format": "pdf",
+            "filename": "weekly",
+        },
+    )
+
+    assert resp.status_code == 400
+    assert "format" in resp.json()["detail"]
 
 
 # ===== LLM 设置端点 =====
