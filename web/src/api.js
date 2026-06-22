@@ -138,6 +138,43 @@ export async function applyEdits(url, edits, revisionId) {
   return res.json()
 }
 
+function filenameFromDisposition(disposition, fallback) {
+  const match = /filename="?([^";]+)"?/i.exec(disposition || '')
+  return match ? match[1] : fallback
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+}
+
+/**
+ * 从飞书文档 URL 导出完整本地文件。
+ * @param {string} url 飞书文档 URL
+ * @param {'md'|'docx'} format 导出格式
+ * @param {string} filename 不带扩展名也可，后端会规整
+ */
+export async function exportDoc(url, format = 'md', filename = 'document') {
+  const res = await fetch(`${BASE}/doc/export`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url, format, filename }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || `导出失败 (${res.status})`)
+  }
+  const blob = await res.blob()
+  const fallback = `${filename}.${format === 'docx' ? 'docx' : 'md'}`
+  downloadBlob(blob, filenameFromDisposition(res.headers.get('content-disposition'), fallback))
+}
+
 // ===== Phase 3: 方案构建模式 =====
 
 export async function loadMany(urls) {

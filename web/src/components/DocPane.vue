@@ -18,6 +18,7 @@ const emit = defineEmits([
   'load-recent',
   'remove-recent',
   'open-search',
+  'export-doc',
   // 新增（单一 contenteditable 架构）
   'split-block',
   'merge-blocks',
@@ -27,6 +28,7 @@ const emit = defineEmits([
 
 const editorRef = ref(null) // 单一 contenteditable 容器
 const editorShellRef = ref(null) // 定位祖先（浮动还原按钮参考系）
+const exportFormat = ref('md')
 
 // 当前聚焦块下标（-1 表示无聚焦）。用于：
 //  - 跳过 watcher 对聚焦块的 text 同步（避免覆盖光标位置）
@@ -355,14 +357,43 @@ onUnmounted(() => {
           </span>
         </div>
       </div>
-      <button
-        @click="$emit('open-external')"
-        class="p-1.5 rounded transition-colors hover:bg-[var(--color-surface-container)]"
-        :style="{ color: 'var(--color-outline)' }"
-        title="在飞书中打开"
-      >
-        <span class="material-symbols-outlined">open_in_new</span>
-      </button>
+      <div class="flex items-center gap-2 shrink-0">
+        <div
+          class="export-control"
+          :style="{
+            border: '1px solid var(--color-outline-variant)',
+            background: 'var(--color-surface-container-lowest)',
+          }"
+        >
+          <select
+            v-model="exportFormat"
+            data-test="export-format"
+            class="export-select"
+            title="选择导出格式"
+            :style="{ color: 'var(--color-on-surface)' }"
+          >
+            <option value="md">MD</option>
+            <option value="docx">DOCX</option>
+          </select>
+          <button
+            data-test="export-doc"
+            class="export-button"
+            title="导出到本地"
+            @click="$emit('export-doc', exportFormat)"
+          >
+            <span class="material-symbols-outlined text-[16px]">download</span>
+            导出
+          </button>
+        </div>
+        <button
+          @click="$emit('open-external')"
+          class="p-1.5 rounded transition-colors hover:bg-[var(--color-surface-container)]"
+          :style="{ color: 'var(--color-outline)' }"
+          title="在飞书中打开"
+        >
+          <span class="material-symbols-outlined">open_in_new</span>
+        </button>
+      </div>
     </div>
 
     <!-- 加载错误 -->
@@ -607,6 +638,36 @@ onUnmounted(() => {
 .doc-block--highlight {
   box-shadow: 0 0 0 2px var(--color-primary);
   border-radius: 4px;
+}
+
+.export-control {
+  display: inline-flex;
+  align-items: center;
+  overflow: hidden;
+  border-radius: 6px;
+}
+.export-select {
+  height: 30px;
+  padding: 0 8px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  font-size: 12px;
+}
+.export-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 30px;
+  padding: 0 10px;
+  border-left: 1px solid var(--color-outline-variant);
+  color: var(--color-primary);
+  font-size: 12px;
+  font-weight: 600;
+  transition: background 0.15s ease;
+}
+.export-button:hover {
+  background: var(--color-surface-container);
 }
 
 /* 旧逐 block 布局样式（保留以兼容，部分已不再使用） */

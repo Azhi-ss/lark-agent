@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed } from 'vue'
-import { loadDoc, chatAgent, applyEdits } from './api.js'
+import { loadDoc, chatAgent, applyEdits, exportDoc } from './api.js'
 import { textToBlockXml } from './blockXml.js'
 import {
   onBlocksChanged as updateBlocksChanged,
@@ -17,6 +17,8 @@ import WorkspaceView from './components/WorkspaceView.vue'
 import SettingsModal from './components/SettingsModal.vue'
 import AboutModal from './components/AboutModal.vue'
 import DocSearchPanel from './components/DocSearchPanel.vue'
+import { createTimeline, mapSseEvent } from './composables/useTimeline.js'
+import ArtifactDrawer from './components/artifact/ArtifactDrawer.vue'
 
 const activeMode = ref('editor') // 'editor' | 'workspace'
 const settingsOpen = ref(false)
@@ -46,14 +48,17 @@ const loading = ref(false)
 const loadError = ref('')
 
 const instruction = ref('提炼本周（最近一篇）核心要点，在文末追加"## 本周要点"摘要段落。')
-const agentText = ref('')
-const agentThinking = ref('')
-const replacements = ref([])
-// 每个 replacement 定位到的 block_id（无法定位为 null）；用于 AgentPane 摘要分组
-const replacementLocations = ref([])
+// P3：统一 timeline 取代散落的 agentText / agentThinking / replacements / replacementLocations。
+// timelineItems 单独导出为顶层 ref，模板自动解包；脚本内通过 timeline.* 调用 push/reset。
+const timeline = createTimeline()
+const timelineItems = timeline.items
 const running = ref(false)
 const applyStatus = ref('')
 const applying = ref(false)
+
+// artifact drawer：drawerArtifact 当前审阅的 artifact；drawerIsLatest 是否为 timeline 中最后一个 artifact
+const drawerArtifact = ref(null)
+const drawerIsLatest = ref(false)
 
 const docPaneRef = ref(null)
 
@@ -68,6 +73,12 @@ function docTitleFromLoad(data) {
   const titleBlock = (data.blocks || []).find((b) => b.kind === 'title')
   if (titleBlock?.text?.trim()) return titleBlock.text.trim()
   return data.document_id || ''
+}
+
+function currentDocTitle() {
+  const titleBlock = blocks.value.find((b) => b.kind === 'title')
+  if (titleBlock?.text?.trim()) return titleBlock.text.trim()
+  return docMeta.value.document_id || 'document'
 }
 
 function loadRecent(url) {
@@ -86,10 +97,7 @@ async function onLoad() {
   loading.value = true
   loadError.value = ''
   blocks.value = []
-  replacements.value = []
-  replacementLocations.value = []
-  agentText.value = ''
-  agentThinking.value = ''
+  timeline.reset()
   applyStatus.value = ''
   try {
     const data = await loadDoc(docUrl.value)
@@ -139,46 +147,45 @@ function locateBlock(pattern) {
   return null
 }
 
+// document_edits artifact 落到 timeline 后的业务副作用：
+// 清掉旧 suggestion，按 pattern 重新定位挂载到 blocks（与 P2 done 分支语义一致）。
+function onDocumentEdits(payload) {
+  const reps = payload?.replacements || []
+  // 清掉旧 suggestion，重新按 pattern 定位挂载
+  for (const b of blocks.value) b.suggestion = null
+  reps.forEach((r) => {
+    const bid = locateBlock(r.pattern)
+    if (bid === null || bid === undefined) return
+    const blk = blocks.value.find((b) => b.block_id === bid)
+    if (blk) {
+      // suggestion.content 是 agent 给的纯文本，接受时再转 xml（见 acceptSuggestion）。
+      blk.suggestion = {
+        content: r.content,
+        reason: r.reason || '',
+        state: 'pending',
+      }
+    }
+  })
+}
+
+// editor 模式无 solution artifact，留空。
+function onSolution(_payload) {}
+
 async function onChat() {
   if (!loaded.value || running.value) return
   running.value = true
-  agentText.value = ''
-  agentThinking.value = ''
-  replacements.value = []
-  replacementLocations.value = []
   applyStatus.value = ''
+  timeline.reset()
+  timeline.pushUser(instruction.value)
   try {
-    // P2 §3.3：只传 url + instruction，不再传 markdown。
-    await chatAgent(docUrl.value, instruction.value, (ev) => {
-      if (ev.type === 'thinking') {
-        agentThinking.value += ev.data.text
-      } else if (ev.type === 'text') {
-        agentText.value += ev.data.text
-      } else if (ev.type === 'done') {
-        const reps = ev.data.replacements || []
-        replacements.value = reps
-        // 清掉旧 suggestion，重新按 pattern 定位挂载
-        for (const b of blocks.value) b.suggestion = null
-        const locs = reps.map((r) => locateBlock(r.pattern))
-        replacementLocations.value = locs
-        reps.forEach((r, i) => {
-          const bid = locs[i]
-          if (bid === null || bid === undefined) return
-          const blk = blocks.value.find((b) => b.block_id === bid)
-          if (blk) {
-            // suggestion.content 现在是 agent 给的纯文本，接受时再转 xml（见 acceptSuggestion）。
-            blk.suggestion = {
-              content: r.content,
-              reason: r.reason || '',
-              state: 'pending',
-            }
-          }
-        })
-      } else if (ev.type === 'error') {
-        applyStatus.value = '错误: ' + ev.data.message
-      }
-    })
+    // P3：SSE 产品语义事件统一走 mapSseEvent → timeline。
+    // artifact 事件先回调业务副作用（onDocumentEdits 挂载 suggestion），再 push 进 timeline 展示。
+    await chatAgent(docUrl.value, instruction.value, (ev) =>
+      mapSseEvent(ev, timeline, { onDocumentEdits, onSolution }),
+    )
   } catch (e) {
+    // 网络层抛错（非 SSE error 事件）→ timeline + footer 双通道提示
+    timeline.pushError(e.message)
     applyStatus.value = '错误: ' + e.message
   } finally {
     running.value = false
@@ -277,10 +284,51 @@ async function onApply() {
   }
 }
 
-function onLocate(blockId) {
-  if (blockId === null || blockId === undefined) return
-  docPaneRef.value?.scrollToBlock(blockId)
+// ===== artifact drawer / timeline 事件处理 =====
+// openArtifact：打开 drawer 审阅某 artifact。id 来自 ConversationTimeline 透传；
+// 在 timeline 中按 id 查找 artifact item，id 缺失时回退到最后一个 artifact。
+// isLatest 取该 item 是否为 timeline 中最后一个 artifact（useTimeline.pushArtifact 已维护此标记）。
+function openArtifact(id) {
+  const artifactItems = timelineItems.value.filter((it) => it.kind === 'artifact')
+  let item = artifactItems.find((it) => it.id === id)
+  if (!item && artifactItems.length > 0) item = artifactItems[artifactItems.length - 1]
+  if (!item) return
+  drawerArtifact.value = item.artifact
+  drawerIsLatest.value = !!item.isLatest
 }
+
+function closeDrawer() {
+  drawerArtifact.value = null
+}
+
+// drawer / timeline locate：pattern → blockId → 滚动定位（复用 locateBlock + DocPane.scrollToBlock）
+function onArtifactLocate(payload) {
+  const bid = locateBlock(payload?.pattern)
+  if (bid === null || bid === undefined) return
+  docPaneRef.value?.scrollToBlock(bid)
+}
+
+// drawer / timeline accept：pattern → blockId → 复用 acceptSuggestion
+function onArtifactAccept(payload) {
+  const bid = locateBlock(payload?.pattern)
+  if (bid === null || bid === undefined) return
+  acceptSuggestion(bid)
+}
+
+// drawer / timeline reject：pattern → blockId → 复用 rejectSuggestion
+function onArtifactReject(payload) {
+  const bid = locateBlock(payload?.pattern)
+  if (bid === null || bid === undefined) return
+  rejectSuggestion(bid)
+}
+
+// drawer / timeline writeback：复用 onApply（写回所有 edited 的块）
+function onArtifactWriteback() {
+  onApply()
+}
+
+// action_required 未知 reason 的通用确认（editor 模式仅 writeback_confirmation，故此分支不会触发）
+function onAction() {}
 
 function onQuickAction(text) {
   instruction.value = text
@@ -289,6 +337,18 @@ function onQuickAction(text) {
 function onOpenExternal() {
   if (docUrl.value) {
     window.open(docUrl.value, '_blank', 'noopener')
+  }
+}
+
+async function onExportDoc(format) {
+  if (!loaded.value || !docUrl.value) return
+  const normalized = format === 'docx' ? 'docx' : 'md'
+  applyStatus.value = `导出 ${normalized.toUpperCase()} 中...`
+  try {
+    await exportDoc(docUrl.value, normalized, currentDocTitle())
+    applyStatus.value = `已导出 ${normalized.toUpperCase()} 到本地`
+  } catch (e) {
+    applyStatus.value = '导出失败: ' + e.message
   }
 }
 </script>
@@ -373,6 +433,7 @@ function onOpenExternal() {
           @load-recent="loadRecent"
           @remove-recent="onRemoveRecent"
           @open-search="searchOpen = true"
+          @export-doc="onExportDoc"
           @split-block="onSplitBlock"
           @merge-blocks="onMergeBlocks"
           @change-block-kind="onChangeBlockKind"
@@ -382,14 +443,27 @@ function onOpenExternal() {
           :loaded="loaded"
           :running="running"
           :instruction="instruction"
-          :agent-text="agentText"
-          :agent-thinking="agentThinking"
-          :replacements="replacements"
-          :replacement-locations="replacementLocations"
+          :timeline-items="timelineItems"
           @update:instruction="instruction = $event"
           @chat="onChat"
           @quick-action="onQuickAction"
-          @locate="onLocate"
+          @open-artifact="openArtifact"
+          @locate="onArtifactLocate"
+          @accept="onArtifactAccept"
+          @reject="onArtifactReject"
+          @writeback="onArtifactWriteback"
+          @action="onAction"
+        />
+        <!-- P3：artifact drawer（Teleport 到 body，仅 editor 模式实例化） -->
+        <ArtifactDrawer
+          :open="!!drawerArtifact"
+          :artifact="drawerArtifact"
+          :is-latest="drawerIsLatest"
+          @close="closeDrawer"
+          @locate="onArtifactLocate"
+          @accept="onArtifactAccept"
+          @reject="onArtifactReject"
+          @writeback="onArtifactWriteback"
         />
       </main>
       <WorkspaceView v-else key="workspace" />
