@@ -187,11 +187,11 @@ def test_block_to_markdown_pre_includes_lang_header():
     assert block_to_markdown(block) == "```python\nprint(1)\n```"
 
 
-# ===== blocks_to_blocklist：前端 Block 契约（计划 §3.1） =====
+# ===== blocks_to_blocklist：前端 Block 契约（P2 §3.1，XML 单一真相源） =====
 
 
 def test_blocks_to_blocklist_returns_contract_fields():
-    """blocks_to_blocklist 输出前端 Block 契约字段，id 透传，markdown==original。"""
+    """blocks_to_blocklist 输出 P2 契约字段：block_id/kind/text/raw_xml/level。"""
     xml = (
         '<title id="blkcnT">周报</title>'
         '<p id="blkcnA">第一段</p>'
@@ -204,21 +204,22 @@ def test_blocks_to_blocklist_returns_contract_fields():
             "block_id",
             "kind",
             "text",
-            "markdown",
-            "original",
+            "raw_xml",
             "level",
         }
-        assert item["markdown"] == item["original"]
     assert result[0]["block_id"] == "blkcnT"
     assert result[0]["kind"] == "title"
     assert result[0]["text"] == "周报"
-    assert result[0]["markdown"] == "# 周报"
     assert result[0]["level"] == 0
+    # raw_xml 含 id 属性，是写回用的原始 XML 片段
+    assert 'id="blkcnT"' in result[0]["raw_xml"]
+    assert "周报" in result[0]["raw_xml"]
     assert result[1]["block_id"] == "blkcnA"
     assert result[1]["kind"] == "p"
-    assert result[1]["markdown"] == "第一段"
+    assert result[1]["text"] == "第一段"
+    assert 'id="blkcnA"' in result[1]["raw_xml"]
     assert result[2]["block_id"] == "blkcnB"
-    assert result[2]["markdown"] == "第二段"
+    assert result[2]["raw_xml"].startswith("<p")
 
 
 def test_blocks_to_blocklist_defaults_block_id_to_empty_when_no_id():
@@ -227,3 +228,14 @@ def test_blocks_to_blocklist_defaults_block_id_to_empty_when_no_id():
     assert len(result) == 1
     assert result[0]["block_id"] == ""
     assert result[0]["kind"] == "p"
+
+
+def test_block_id_of_extracts_id_from_meta():
+    """block_id_of 取 meta['id']，无则空串。"""
+    from backend.lark.doc_xml import block_id_of, parse_xml
+
+    [b_with, b_without] = parse_xml(
+        '<p id="blkcnX">有</p><p>没有</p>'
+    )
+    assert block_id_of(b_with) == "blkcnX"
+    assert block_id_of(b_without) == ""

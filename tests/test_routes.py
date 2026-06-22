@@ -64,7 +64,10 @@ def test_apply_validates_empty_replacements(monkeypatch):
 
 
 def test_apply_block_replace_passes_through_params_and_revision(monkeypatch):
-    """edits 非空走 block_replace：update_doc 收到正确参数，revision_id 串行透传，响应结构正确。"""
+    """edits 非空走 block_replace：update_doc 收到正确参数，revision_id 串行透传，响应结构正确。
+
+    P2：edit 字段 content→xml，写回 doc_format=xml（单一真相源）。
+    """
     monkeypatch.setattr(
         "backend.api.routes.settings",
         Settings(writeback_enabled=True),
@@ -89,7 +92,7 @@ def test_apply_block_replace_passes_through_params_and_revision(monkeypatch):
         return {"document": {"revision_id": 13}}
 
     # 写前乐观锁校验：fetch_doc 返回的版本须与请求一致才放行
-    def fake_fetch(doc_ref, *, doc_format="xml"):
+    def fake_fetch(doc_ref, *, doc_format="xml", detail="simple"):
         return FetchResult(document_id="fake", revision_id=12, content_xml="")
 
     monkeypatch.setattr("backend.api.routes.update_doc", fake_update_doc)
@@ -101,8 +104,8 @@ def test_apply_block_replace_passes_through_params_and_revision(monkeypatch):
             "url": "https://example.feishu.cn/docx/fake",
             "revision_id": 12,
             "edits": [
-                {"block_id": "blkcnA", "content": "改后A"},
-                {"block_id": "blkcnB", "content": "改后B"},
+                {"block_id": "blkcnA", "xml": "<p>改后A</p>"},
+                {"block_id": "blkcnB", "xml": "<p>改后B</p>"},
             ],
         },
     )
@@ -122,9 +125,9 @@ def test_apply_block_replace_passes_through_params_and_revision(monkeypatch):
     assert len(calls) == 2
     first = calls[0]
     assert first["command"] == "block_replace"
-    assert first["doc_format"] == "markdown"
+    assert first["doc_format"] == "xml"
     assert first["block_id"] == "blkcnA"
-    assert first["content"] == "改后A"
+    assert first["content"] == "<p>改后A</p>"
     assert first["revision_id"] == 12  # 首次用加载时版本
     # 串行乐观锁：第二次用前一次返回的新版本
     assert calls[1]["revision_id"] == 13
@@ -143,7 +146,7 @@ def test_apply_block_replace_rejects_on_revision_conflict(monkeypatch):
         return {"document": {"revision_id": 999}}
 
     # 客户端持有 revision_id=12，但文档实际已被改到 15
-    def fake_fetch(doc_ref, *, doc_format="xml"):
+    def fake_fetch(doc_ref, *, doc_format="xml", detail="simple"):
         return FetchResult(document_id="fake", revision_id=15, content_xml="")
 
     monkeypatch.setattr("backend.api.routes.update_doc", fake_update_doc)
@@ -154,7 +157,7 @@ def test_apply_block_replace_rejects_on_revision_conflict(monkeypatch):
         json={
             "url": "https://example.feishu.cn/docx/fake",
             "revision_id": 12,
-            "edits": [{"block_id": "blkcnA", "content": "改后A"}],
+            "edits": [{"block_id": "blkcnA", "xml": "<p>改后A</p>"}],
         },
     )
     assert resp.status_code == 200
@@ -168,7 +171,10 @@ def test_apply_block_replace_rejects_on_revision_conflict(monkeypatch):
 
 
 def test_apply_empty_content_uses_block_delete(monkeypatch):
-    """edits 中 content 为空串时改用 block_delete（block_replace 不接受空 content）。"""
+    """edits 中 xml 为空串时改用 block_delete（block_replace 不接受空 content）。
+
+    P2：空 xml = 删整块 → block_delete（doc_format=xml）。
+    """
     monkeypatch.setattr(
         "backend.api.routes.settings",
         Settings(writeback_enabled=True),
@@ -179,10 +185,13 @@ def test_apply_empty_content_uses_block_delete(monkeypatch):
         doc_ref, *, command, content="", pattern=None,
         block_id=None, doc_format="xml", revision_id=-1,
     ):
-        calls.append({"command": command, "block_id": block_id, "content": content})
+        calls.append(
+            {"command": command, "block_id": block_id, "content": content,
+             "doc_format": doc_format}
+        )
         return {"document": {"revision_id": 13}}
 
-    def fake_fetch(doc_ref, *, doc_format="xml"):
+    def fake_fetch(doc_ref, *, doc_format="xml", detail="simple"):
         return FetchResult(document_id="fake", revision_id=12, content_xml="")
 
     monkeypatch.setattr("backend.api.routes.update_doc", fake_update_doc)
@@ -193,15 +202,16 @@ def test_apply_empty_content_uses_block_delete(monkeypatch):
         json={
             "url": "https://example.feishu.cn/docx/fake",
             "revision_id": 12,
-            "edits": [{"block_id": "blkcnA", "content": ""}],
+            "edits": [{"block_id": "blkcnA", "xml": ""}],
         },
     )
     assert resp.status_code == 200
     body = resp.json()
     assert body["ok"] is True
-    # 空 content → block_delete，而非 block_replace
+    # 空 xml → block_delete，而非 block_replace；P2 用 doc_format=xml
     assert calls[0]["command"] == "block_delete"
     assert calls[0]["block_id"] == "blkcnA"
+    assert calls[0]["doc_format"] == "xml"
 
 
 def test_apply_falls_back_to_str_replace_when_only_replacements(monkeypatch):
@@ -265,7 +275,7 @@ def test_apply_block_replace_simulated_when_writeback_disabled(monkeypatch):
         json={
             "url": "https://example.feishu.cn/docx/fake",
             "revision_id": 12,
-            "edits": [{"block_id": "blkcnA", "content": "改后A"}],
+            "edits": [{"block_id": "blkcnA", "xml": "<p>改后A</p>"}],
         },
     )
     assert resp.status_code == 200
@@ -279,12 +289,7 @@ def test_apply_block_replace_simulated_when_writeback_disabled(monkeypatch):
 
 
 def test_load_doc_returns_block_count(monkeypatch):
-    """mock fetch_doc 后,/api/doc/load 返回 markdown + block_count。"""
-    fake_md = FetchResult(
-        document_id="doc123",
-        revision_id=5,
-        content_xml="# 周报\n第一段",
-    )
+    """mock fetch_doc 后,/api/doc/load 返回 block_count（P2：只 fetch xml）。"""
     fake_xml = FetchResult(
         document_id="doc123",
         revision_id=5,
@@ -292,7 +297,7 @@ def test_load_doc_returns_block_count(monkeypatch):
     )
 
     def fake_fetch(doc_ref: str, *, doc_format: str = "xml", detail: str = "simple"):
-        return fake_md if doc_format == "markdown" else fake_xml
+        return fake_xml
 
     monkeypatch.setattr("backend.api.routes.fetch_doc", fake_fetch)
 
@@ -304,17 +309,13 @@ def test_load_doc_returns_block_count(monkeypatch):
     body = resp.json()
     assert body["document_id"] == "doc123"
     assert body["revision_id"] == 5
-    assert body["markdown"] == "# 周报\n第一段"
     assert body["block_count"] == 2
+    # P2：不再返回 markdown 整篇
+    assert "markdown" not in body
 
 
 def test_load_doc_returns_blocks_with_ids(monkeypatch):
-    """/api/doc/load 返回 blocks 列表：with-ids 的 XML 解析后 block_id 正确、非空。"""
-    fake_md = FetchResult(
-        document_id="doc123",
-        revision_id=5,
-        content_xml="# 周报\n本周内容",
-    )
+    """/api/doc/load 返回 blocks 列表：with-ids 的 XML 解析后 block_id 正确、raw_xml 含 id。"""
     fake_xml = FetchResult(
         document_id="doc123",
         revision_id=5,
@@ -322,7 +323,7 @@ def test_load_doc_returns_blocks_with_ids(monkeypatch):
     )
 
     def fake_fetch(doc_ref: str, *, doc_format: str = "xml", detail: str = "simple"):
-        return fake_md if doc_format == "markdown" else fake_xml
+        return fake_xml
 
     monkeypatch.setattr("backend.api.routes.fetch_doc", fake_fetch)
 
@@ -339,13 +340,15 @@ def test_load_doc_returns_blocks_with_ids(monkeypatch):
     assert blocks[0]["kind"] == "title"
     assert blocks[1]["block_id"] == "blkcnA"
     assert blocks[1]["kind"] == "p"
+    # P2：每块带 raw_xml（含 id 属性）
+    assert 'id="blkcnA"' in blocks[1]["raw_xml"]
 
 
 def test_load_doc_propagates_lark_error_as_502(monkeypatch):
     """fetch_doc 抛 LarkError 时,/api/doc/load 返回 502。"""
     from backend.lark.cli_wrapper import LarkError
 
-    def raising_fetch(doc_ref: str, *, doc_format: str = "xml"):
+    def raising_fetch(doc_ref: str, *, doc_format: str = "xml", detail: str = "simple"):
         raise LarkError("文档不存在")
 
     monkeypatch.setattr("backend.api.routes.fetch_doc", raising_fetch)

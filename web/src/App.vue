@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { loadDoc, chatAgent, applyEdits } from './api.js'
+import { textToBlockXml } from './blockXml.js'
 import { recordRecent, listRecent, removeRecent } from './recentDocs.js'
 import TopBar from './components/TopBar.vue'
 import DocPane from './components/DocPane.vue'
@@ -30,7 +31,9 @@ function onImportToEditor(urls) {
 }
 
 const docUrl = ref('https://dptechnology.feishu.cn/wiki/OWAIwHYLJiyEHjkJvRAcEmKnn7y')
-const markdown = ref('')
+// P2：blocks 是唯一真相源，不再维护整篇 markdown。
+// block 结构：{block_id, kind, text, raw_xml, level, original_text, original_xml,
+//              edited, suggestion, pending_xml}
 const blocks = ref([])
 const docMeta = ref({ document_id: '', revision_id: 0, block_count: 0 })
 const loading = ref(false)
@@ -48,21 +51,16 @@ const applying = ref(false)
 
 const docPaneRef = ref(null)
 
-const loaded = computed(() => markdown.value.length > 0)
+const loaded = computed(() => blocks.value.length > 0)
 const editedCount = computed(() => blocks.value.filter((b) => b.edited).length)
 
 // 最近访问文档（localStorage 持久化），加载成功后记录并刷新
 const recentDocs = ref(listRecent())
 
 function docTitleFromLoad(data) {
-  // 优先取首个 title 块文本，回退 markdown 首个非空标题行，再回退 document_id
+  // 优先取首个 title 块文本，回退 document_id（P2 不再有整篇 markdown）
   const titleBlock = (data.blocks || []).find((b) => b.kind === 'title')
   if (titleBlock?.text?.trim()) return titleBlock.text.trim()
-  const mdLine = (data.markdown || '')
-    .split('\n')
-    .map((l) => l.trim())
-    .find((l) => /^#{1,6}\s+/.test(l))
-  if (mdLine) return mdLine.replace(/^#{1,6}\s+/, '')
   return data.document_id || ''
 }
 
@@ -81,7 +79,6 @@ async function onLoad() {
   if (loading.value) return
   loading.value = true
   loadError.value = ''
-  markdown.value = ''
   blocks.value = []
   replacements.value = []
   replacementLocations.value = []
@@ -90,22 +87,25 @@ async function onLoad() {
   applyStatus.value = ''
   try {
     const data = await loadDoc(docUrl.value)
-    markdown.value = data.markdown
     docMeta.value = {
       document_id: data.document_id,
       revision_id: data.revision_id,
-      block_count: data.block_count,
+      block_count: (data.blocks || []).length,
     }
-    // 后端契约 §3.1：blocks 数组。map 成前端可编辑结构（edited:false, suggestion:null）。
+    // 后端契约 §3.2：blocks 每项 {block_id, kind, text, raw_xml, level}。
+    // map 成前端可编辑结构：text 作编辑初始值，raw_xml/original_text/original_xml 保留作还原基线。
     blocks.value = (data.blocks || []).map((b) => ({
       block_id: b.block_id ?? '',
       kind: b.kind,
       text: b.text ?? '',
-      markdown: b.markdown ?? '',
-      original: b.original ?? b.markdown ?? '',
+      raw_xml: b.raw_xml ?? '',
       level: b.level ?? 0,
+      // 还原基线：写回前原始文本与原始 xml（写回后 block-id 会变，重 load 会刷新这两项）
+      original_text: b.text ?? '',
+      original_xml: b.raw_xml ?? '',
       edited: false,
       suggestion: null,
+      pending_xml: null,
     }))
     // 加载成功 → 记录到最近访问（localStorage 持久化）
     recordRecent(docUrl.value, docTitleFromLoad(data))
@@ -117,17 +117,18 @@ async function onLoad() {
   }
 }
 
-// §5.1 pattern -> block_id 定位：先精确子串，后归一化去空白
+// §5.1 pattern -> block_id 定位：先在块 text 里精确子串，后归一化去空白。
+// 注意：P2 定位基于块纯文本 text（agent 给的 pattern 落在单块 text 内）。
 function locateBlock(pattern) {
   if (!pattern) return null
   for (const b of blocks.value) {
-    if (b.markdown.includes(pattern)) return b.block_id
+    if (b.text.includes(pattern)) return b.block_id
   }
   const norm = (s) => s.replace(/\s+/g, '')
   const np = norm(pattern)
   if (!np) return null
   for (const b of blocks.value) {
-    if (norm(b.markdown).includes(np)) return b.block_id
+    if (norm(b.text).includes(np)) return b.block_id
   }
   return null
 }
@@ -141,7 +142,8 @@ async function onChat() {
   replacementLocations.value = []
   applyStatus.value = ''
   try {
-    await chatAgent(markdown.value, instruction.value, (ev) => {
+    // P2 §3.3：只传 url + instruction，不再传 markdown。
+    await chatAgent(docUrl.value, instruction.value, (ev) => {
       if (ev.type === 'thinking') {
         agentThinking.value += ev.data.text
       } else if (ev.type === 'text') {
@@ -158,7 +160,12 @@ async function onChat() {
           if (bid === null || bid === undefined) return
           const blk = blocks.value.find((b) => b.block_id === bid)
           if (blk) {
-            blk.suggestion = { content: r.content, reason: r.reason || '', state: 'pending' }
+            // suggestion.content 现在是 agent 给的纯文本，接受时再转 xml（见 acceptSuggestion）。
+            blk.suggestion = {
+              content: r.content,
+              reason: r.reason || '',
+              state: 'pending',
+            }
           }
         })
       } else if (ev.type === 'error') {
@@ -176,11 +183,12 @@ function findBlock(blockId) {
   return blocks.value.find((b) => b.block_id === blockId)
 }
 
-// §5.2 接受/拒绝/手编/还原语义
+// §5.2 接受/拒绝/手编/还原语义。P2：编辑/接受都生成该块 xml 存 pending_xml。
 function acceptSuggestion(blockId) {
   const b = findBlock(blockId)
   if (!b || !b.suggestion) return
-  b.markdown = b.suggestion.content
+  b.text = b.suggestion.content
+  b.pending_xml = textToBlockXml(b.kind, b.text)
   b.edited = true
   b.suggestion.state = 'accepted'
 }
@@ -191,45 +199,44 @@ function rejectSuggestion(blockId) {
   b.suggestion.state = 'rejected'
 }
 
-function editBlock(blockId, newMarkdown) {
+// 手编：存 block.text=newText，按 kind 生成 xml 存 pending_xml，edited=true。
+function editBlock(blockId, newText) {
   const b = findBlock(blockId)
   if (!b) return
-  b.markdown = newMarkdown
+  b.text = newText
+  b.pending_xml = textToBlockXml(b.kind, newText)
   b.edited = true
 }
 
+// 还原：text/raw_xml 恢复原始，edited=false，pending_xml=null，suggestion=null。
 function resetBlock(blockId) {
   const b = findBlock(blockId)
   if (!b) return
-  b.markdown = b.original
+  b.text = b.original_text
+  b.raw_xml = b.original_xml
   b.edited = false
+  b.pending_xml = null
   b.suggestion = null
 }
 
+// §5.2 写回后重新 load 是核心修复：block-id 写回后必变（飞书硬约束），
+// 必须 re-fetch 刷新 block-id + revision_id，否则下次写回用失效旧 id。
 async function onApply() {
   const edited = blocks.value.filter((b) => b.edited)
   if (edited.length === 0 || applying.value) return
   applying.value = true
   applyStatus.value = '写回中...'
   try {
-    const edits = edited.map((b) => ({ block_id: b.block_id, content: b.markdown }))
+    // edits = [{block_id, xml: b.pending_xml}]；空 pending_xml（空文本）→ block_delete。
+    const edits = edited.map((b) => ({ block_id: b.block_id, xml: b.pending_xml ?? '' }))
     const res = await applyEdits(docUrl.value, edits, docMeta.value.revision_id)
     if (res.conflict) {
       applyStatus.value = '文档已被修改，请重新加载'
     } else if (res.ok) {
+      applyStatus.value = `已写回飞书（${res.count ?? edited.length} 块），正在刷新…`
+      // 关键修复：重新加载刷新 block-id + revision_id（P2 §2 支柱 2）。
+      await onLoad()
       applyStatus.value = `已写回飞书（${res.count ?? edited.length} 块）`
-      // 清 edited 标记，并把 original 推进到刚写回的内容（还原以新基线为准）
-      for (const b of edited) {
-        b.edited = false
-        b.original = b.markdown
-      }
-      // 已接受的建议已落库，清掉卡片
-      for (const b of blocks.value) {
-        if (b.suggestion && b.suggestion.state === 'accepted') b.suggestion = null
-      }
-      if (res.final_revision_id) {
-        docMeta.value = { ...docMeta.value, revision_id: res.final_revision_id }
-      }
     } else {
       const failed = (res.results || []).filter((r) => !r.ok).length
       applyStatus.value = `部分失败：${failed} 块`

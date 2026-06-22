@@ -2,6 +2,12 @@
 
 const BASE = '/api'
 
+/**
+ * 加载单文档。响应 {document_id, revision_id, blocks}，
+ * blocks 每项 {block_id, kind, text, raw_xml, level}（P2 XML 单一真相源）。
+ * 不再返回整篇 markdown。
+ * @param {string} url 飞书文档 URL
+ */
 export async function loadDoc(url) {
   const res = await fetch(`${BASE}/doc/load`, {
     method: 'POST',
@@ -81,15 +87,16 @@ export async function searchDocs(query, opts = {}) {
 
 /**
  * 流式调用 agent，通过 SSE 接收事件。
- * @param {string} markdown
- * @param {string} instruction
+ * P2：不再传 markdown，后端按 url 自取 blocks_to_text 作上下文（§3.3）。
+ * @param {string} url 飞书文档 URL
+ * @param {string} instruction 用户指令
  * @param {(ev: {type: string, data: any}) => void} onEvent
  */
-export async function chatAgent(markdown, instruction, onEvent) {
+export async function chatAgent(url, instruction, onEvent) {
   const res = await fetch(`${BASE}/agent/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ markdown, instruction }),
+    body: JSON.stringify({ url, instruction }),
   })
   if (!res.ok || !res.body) {
     throw new Error(`agent 调用失败 (${res.status})`)
@@ -116,9 +123,10 @@ export async function chatAgent(markdown, instruction, onEvent) {
 }
 
 /**
- * 按块写回飞书（block-level，带乐观锁）。
+ * 按块写回飞书（XML block 级，带乐观锁）。
+ * P2：edits 改 {block_id, xml}（§3.4）。空 xml = 删除整块 → block_delete。
  * @param {string} url 文档 URL
- * @param {Array<{block_id:string, content:string}>} edits 待写回的块
+ * @param {Array<{block_id:string, xml:string}>} edits 待写回的块
  * @param {number} revisionId 加载时的 revision_id，做乐观锁
  */
 export async function applyEdits(url, edits, revisionId) {

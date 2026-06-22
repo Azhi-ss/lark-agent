@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from backend.agent.agent import run_agent_stream, run_solution_stream
 from backend.config import get_runtime_llm, settings, update_runtime_llm
 from backend.lark.cli_wrapper import LarkError, fetch_doc, search_docs, update_doc
-from backend.lark.doc_xml import blocks_to_blocklist, parse_xml
+from backend.lark.doc_xml import blocks_to_blocklist, blocks_to_text, parse_xml
 
 router = APIRouter()
 
@@ -46,13 +46,12 @@ class LoadRequest(BaseModel):
 class LoadResponse(BaseModel):
     document_id: str
     revision_id: int
-    markdown: str
     block_count: int
     blocks: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ChatRequest(BaseModel):
-    markdown: str
+    url: str = Field(..., description="飞书文档 URL（docx/wiki），后端自行 fetch XML 作上下文")
     instruction: str
 
 
@@ -64,7 +63,7 @@ class ReplacementItem(BaseModel):
 
 class BlockEdit(BaseModel):
     block_id: str
-    content: str
+    xml: str
 
 
 class ApplyRequest(BaseModel):
@@ -76,17 +75,19 @@ class ApplyRequest(BaseModel):
 
 @router.post("/doc/load", response_model=LoadResponse)
 def load_doc(req: LoadRequest) -> LoadResponse:
-    """加载飞书文档：返回 markdown（agent 用）+ block 数 + blocks（逐块编辑用）。"""
+    """加载飞书文档：fetch XML（with-ids）一次，返回 blocks（含 raw_xml）。
+
+    P2：XML 作为单一真相源，不再 fetch markdown；agent 上下文由 /agent/chat
+    自行 fetch + blocks_to_text 生成。
+    """
     try:
-        md = fetch_doc(req.url, doc_format="markdown")
         xml = fetch_doc(req.url, doc_format="xml", detail="with-ids")
     except LarkError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     blocks = blocks_to_blocklist(xml.content_xml)
     return LoadResponse(
-        document_id=md.document_id,
-        revision_id=md.revision_id,
-        markdown=md.content_xml,
+        document_id=xml.document_id,
+        revision_id=xml.revision_id,
         block_count=len(blocks),
         blocks=blocks,
     )
@@ -94,11 +95,22 @@ def load_doc(req: LoadRequest) -> LoadResponse:
 
 @router.post("/agent/chat")
 async def agent_chat(req: ChatRequest):
-    """SSE 流：推送 agent 的 thinking / text / done 事件。"""
+    """SSE 流：推送 agent 的 thinking / text / done 事件。
+
+    P2：后端自行 fetch 文档 XML（with-ids）→ parse_xml → blocks_to_text 作为
+    agent 上下文；前端只传 url + instruction。
+    """
     from fastapi.responses import StreamingResponse
 
+    try:
+        xml = fetch_doc(req.url, doc_format="xml", detail="with-ids")
+    except LarkError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    blocks = parse_xml(xml.content_xml)
+    doc_text = blocks_to_text(blocks)
+
     def gen():
-        for ev in run_agent_stream(req.markdown, req.instruction):
+        for ev in run_agent_stream(doc_text, req.instruction):
             yield ev.as_sse()
 
     return StreamingResponse(gen(), media_type="text/event-stream")
@@ -180,8 +192,9 @@ def _apply_block_edits(req: ApplyRequest) -> dict[str, Any]:
     # 写前乐观锁校验：飞书 block_replace 对过期 revision_id 静默不写且不报错，
     # 无法依赖其返回值判断冲突，故写前显式 fetch 当前版本比对。
     # （联调实测：过期 revision_id 写回返回 ok 但 revision 不递增、内容不变。）
+    # P2：fetch 用 xml（单一真相源），仅取 revision_id 比对。
     try:
-        current = fetch_doc(req.url, doc_format="markdown")
+        current = fetch_doc(req.url, doc_format="xml")
     except LarkError as exc:
         return {
             "ok": False,
@@ -208,14 +221,15 @@ def _apply_block_edits(req: ApplyRequest) -> dict[str, Any]:
     conflict = False
     for e in req.edits:
         try:
-            # 空 content = 用户删除该 block 内容：block_replace 不接受空 content，
+            # 空 xml = 用户删除该 block：block_replace 不接受空 content，
             # 改用 block_delete（飞书语义：删除整块，非清空保留）。
-            if e.content == "":
+            # P2：写回统一用 doc_format=xml，content 为该块编辑后的完整 XML 片段。
+            if e.xml == "":
                 data = update_doc(
                     req.url,
                     command="block_delete",
                     block_id=e.block_id,
-                    doc_format="markdown",
+                    doc_format="xml",
                     revision_id=cur_rev,
                 )
             else:
@@ -223,8 +237,8 @@ def _apply_block_edits(req: ApplyRequest) -> dict[str, Any]:
                     req.url,
                     command="block_replace",
                     block_id=e.block_id,
-                    content=e.content,
-                    doc_format="markdown",
+                    content=e.xml,
+                    doc_format="xml",
                     revision_id=cur_rev,
                 )
             new_rev = _extract_revision_id(data, cur_rev)

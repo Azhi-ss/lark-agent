@@ -190,27 +190,28 @@ def _table_to_markdown(block: Block) -> str:
     return "\n".join(lines)
 
 
-def blocks_to_blocklist(content_xml: str) -> list[dict[str, Any]]:
-    """把飞书 docx XML 转成前端 Block 列表（计划 §3.1 契约）。
+def block_id_of(block: Block) -> str:
+    """从 block.meta 取 id，无则空串（P2 契约 §3.1）。"""
+    return block.meta.get("id", "")
 
-    每个 block 输出 dict：block_id（取自 meta 的 id，无则空串）、kind、text、
-    markdown、original（与 markdown 同值）、level。
+
+def blocks_to_blocklist(content_xml: str) -> list[dict[str, Any]]:
+    """把飞书 docx XML 转成前端 Block 列表（P2 契约，XML 作为单一真相源）。
+
+    每个 block 输出 dict：block_id、kind、text（纯文本，agent 看 + 编辑初始值）、
+    raw_xml（该块原始 XML 片段，含 id 属性，写回用）、level。
     """
     blocks = parse_xml(content_xml)
-    result: list[dict[str, Any]] = []
-    for b in blocks:
-        md = block_to_markdown(b)
-        result.append(
-            {
-                "block_id": b.meta.get("id", ""),
-                "kind": b.kind,
-                "text": b.text,
-                "markdown": md,
-                "original": md,
-                "level": b.level,
-            }
-        )
-    return result
+    return [
+        {
+            "block_id": block_id_of(b),
+            "kind": b.kind,
+            "text": b.text,
+            "raw_xml": b.raw_xml,
+            "level": b.level,
+        }
+        for b in blocks
+    ]
 
 
 def diff_blocks(old: list[Block], new: list[Block]) -> list[DiffOp]:

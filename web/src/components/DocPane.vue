@@ -19,8 +19,9 @@ const emit = defineEmits([
   'open-search',
 ])
 
-// P1 仅这些 kind 可编辑（§5.5）
-const EDITABLE_KINDS = new Set(['title', 'h1', 'h2', 'h3', 'h4', 'p', 'ul', 'ol', 'pre'])
+// P2 §5.3：收紧可编辑范围。title 改只读（block_replace 行为不确定，见 §6）。
+// 可编辑：h1-h4 / p / ul / ol / pre。
+const EDITABLE_KINDS = new Set(['h1', 'h2', 'h3', 'h4', 'p', 'ul', 'ol', 'pre'])
 
 function isEditable(kind) {
   return EDITABLE_KINDS.has(kind)
@@ -29,7 +30,6 @@ function isEditable(kind) {
 // contenteditable 用哪种标签渲染
 function tagFor(kind) {
   switch (kind) {
-    case 'title':
     case 'h1':
       return 'h1'
     case 'h2':
@@ -45,66 +45,6 @@ function tagFor(kind) {
   }
 }
 
-// markdown -> 可见文本（剥除该 kind 的语法前缀，用于 contenteditable 初始显示）
-function markdownToBlockText(kind, md) {
-  if (!md) return ''
-  switch (kind) {
-    case 'title':
-    case 'h1':
-      return md.replace(/^#\s+/, '')
-    case 'h2':
-      return md.replace(/^##\s+/, '')
-    case 'h3':
-      return md.replace(/^###\s+/, '')
-    case 'h4':
-      return md.replace(/^####\s+/, '')
-    case 'ul':
-      return md
-        .split('\n')
-        .map((l) => l.replace(/^[-*]\s*/, ''))
-        .join('\n')
-    case 'ol':
-      return md
-        .split('\n')
-        .map((l) => l.replace(/^\d+\.\s*/, ''))
-        .join('\n')
-    case 'pre':
-      return md.replace(/^```[^\n]*\n?/, '').replace(/\n?```$/, '')
-    default:
-      return md
-  }
-}
-
-// innerText -> 该 kind 的 markdown（blur 时调用）
-function blockTextToMarkdown(kind, text) {
-  if (text == null) text = ''
-  switch (kind) {
-    case 'title':
-    case 'h1':
-      return `# ${text}`
-    case 'h2':
-      return `## ${text}`
-    case 'h3':
-      return `### ${text}`
-    case 'h4':
-      return `#### ${text}`
-    case 'ul':
-      return text
-        .split('\n')
-        .map((l) => (l.trim() ? `- ${l}` : l))
-        .join('\n')
-    case 'ol':
-      return text
-        .split('\n')
-        .map((l, i) => (l.trim() ? `${i + 1}. ${l}` : l))
-        .join('\n')
-    case 'pre':
-      return '```\n' + text + '\n```'
-    default:
-      return text
-  }
-}
-
 // 正在编辑的块下标（防止 watcher 把用户未提交的输入覆盖掉）
 const focusedIndex = ref(-1)
 // 从右栏「定位到文档」时短暂高亮的块下标
@@ -113,15 +53,16 @@ const highlightedIndex = ref(-1)
 function onFocus(i) {
   focusedIndex.value = i
 }
+// P2：blur 发的是纯文本（非 markdown），父组件按 kind 生成 xml。
 function onBlur(i, block, e) {
   focusedIndex.value = -1
-  emit('edit-block', block.block_id, blockTextToMarkdown(block.kind, e.target.innerText))
+  emit('edit-block', block.block_id, e.target.innerText)
 }
 
-// 当 block.markdown 被外部改变（接受建议 / 还原 / blur 回写）时，把 contenteditable
-// 文本同步成最新值；正在编辑的块跳过。用 markdown 签名做浅 watch，避免每个属性变更都重扫。
-const blockMarkdownSignature = computed(() =>
-  props.blocks.map((b) => b.markdown).join('\n')
+// 当 block.text 被外部改变（接受建议 / 还原 / blur 回写）时，把 contenteditable
+// 文本同步成最新值；正在编辑的块跳过。用 text 签名做浅 watch，避免每个属性变更都重扫。
+const blockTextSignature = computed(() =>
+  props.blocks.map((b) => b.text).join('\n')
 )
 function syncAll() {
   for (let i = 0; i < props.blocks.length; i++) {
@@ -130,11 +71,11 @@ function syncAll() {
     const el = document.getElementById('editable-' + i)
     if (!el) continue
     if (focusedIndex.value === i) continue
-    const want = markdownToBlockText(b.kind, b.markdown)
-    if (el.innerText !== want) el.innerText = want
+    // P2：直接显示 block.text（纯文本），无需剥除 markdown 前缀。
+    if (el.innerText !== b.text) el.innerText = b.text
   }
 }
-watch(blockMarkdownSignature, () => nextTick(syncAll), { immediate: true })
+watch(blockTextSignature, () => nextTick(syncAll), { immediate: true })
 
 // 暴露给 App.vue：从右栏摘要定位到左栏对应 block（滚动 + 高亮）
 function scrollToBlock(blockId) {
@@ -153,6 +94,7 @@ defineExpose({ scrollToBlock })
 function iconFor(kind) {
   return (
     {
+      title: 'title',
       table: 'table_chart',
       figure: 'image',
       img: 'image',
@@ -167,6 +109,7 @@ function iconFor(kind) {
 function labelFor(kind) {
   return (
     {
+      title: '文档标题',
       table: '表格',
       figure: '图片/附件',
       img: '图片',
@@ -379,6 +322,13 @@ function truncate(s, n) {
             <hr />
           </div>
 
+          <!-- 只读：文档标题（P2 标只读不可 block_replace，但仍作大标题展示） -->
+          <h1
+            v-else-if="block.kind === 'title'"
+            class="kind-title readonly-title"
+            :title="'文档标题，只读'"
+          >{{ block.text }}</h1>
+
           <!-- 只读占位：table/figure/img/callout/grid/bookmark/cite -->
           <div v-else class="readonly-block">
             <span class="material-symbols-outlined readonly-icon">{{ iconFor(block.kind) }}</span>
@@ -467,6 +417,10 @@ function truncate(s, n) {
   font-size: 1.6em;
   font-weight: 700;
   margin: 0.4em 0 0.2em;
+}
+.readonly-title {
+  color: var(--color-on-surface);
+  cursor: default;
 }
 .kind-h2 {
   font-size: 1.35em;
