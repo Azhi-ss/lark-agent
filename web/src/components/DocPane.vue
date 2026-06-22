@@ -13,6 +13,7 @@ const emit = defineEmits([
   'accept-suggestion',
   'reject-suggestion',
   'reset-block',
+  'delete-block',
   'edit-block',
   'load-recent',
   'remove-recent',
@@ -56,7 +57,16 @@ function onFocus(i) {
 // P2：blur 发的是纯文本（非 markdown），父组件按 kind 生成 xml。
 function onBlur(i, block, e) {
   focusedIndex.value = -1
+  // 已标记删除的块不再回写文本（避免空 contenteditable 残留 <br> 污染 pending_xml）
+  if (block.deleting) return
   emit('edit-block', block.block_id, e.target.innerText)
+}
+
+// 删除整块：确认后通知父组件置 pending_xml=''（写回走 block_delete）。
+function onDelete(block) {
+  const preview = (block.text || '').trim().slice(0, 30)
+  if (!window.confirm(`删除该整块？${preview ? `\n内容预览：${preview}` : ''}`)) return
+  emit('delete-block', block.block_id)
 }
 
 // 当 block.text 被外部改变（接受建议 / 还原 / blur 回写）时，把 contenteditable
@@ -290,7 +300,10 @@ function truncate(s, n) {
           :key="i"
           :id="'doc-block-' + i"
           class="doc-block"
-          :class="{ 'doc-block--highlight': highlightedIndex === i }"
+          :class="{
+            'doc-block--highlight': highlightedIndex === i,
+            'is-deleting': block.deleting,
+          }"
         >
           <!-- 可编辑块 -->
           <div v-if="isEditable(block.kind)" class="editable-wrap">
@@ -313,6 +326,13 @@ function truncate(s, n) {
                 @click="$emit('reset-block', block.block_id)"
               >
                 <span class="material-symbols-outlined text-[15px]">restart_alt</span>还原
+              </button>
+              <button
+                class="delete-btn"
+                title="删除整块（写回后从文档移除）"
+                @click="onDelete(block)"
+              >
+                <span class="material-symbols-outlined text-[15px]">delete</span>删除
               </button>
             </div>
           </div>
@@ -472,6 +492,30 @@ function truncate(s, n) {
 }
 .reset-btn:hover {
   background: var(--color-surface-container-high);
+}
+
+/* 删除块按钮 */
+.delete-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  margin-top: 4px;
+  padding: 2px 8px;
+  font-size: 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(220, 38, 38, 0.3);
+  background: var(--color-surface);
+  color: #dc2626;
+  transition: background 0.15s ease;
+}
+.delete-btn:hover {
+  background: rgba(220, 38, 38, 0.08);
+}
+/* 标记删除的块：置灰 + 删除线提示 */
+.doc-block.is-deleting .editable-content {
+  opacity: 0.45;
+  text-decoration: line-through;
 }
 
 /* 只读占位 */

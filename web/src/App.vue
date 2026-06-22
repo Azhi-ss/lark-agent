@@ -106,6 +106,7 @@ async function onLoad() {
       edited: false,
       suggestion: null,
       pending_xml: null,
+      deleting: false,
     }))
     // 加载成功 → 记录到最近访问（localStorage 持久化）
     recordRecent(docUrl.value, docTitleFromLoad(data))
@@ -159,7 +160,8 @@ async function onChat() {
           const bid = locs[i]
           if (bid === null || bid === undefined) return
           const blk = blocks.value.find((b) => b.block_id === bid)
-          if (blk) {
+          // 跳过已标记删除的块：不再给将删除的块挂建议，避免 deleting + 非空 pending_xml 状态不一致
+          if (blk && !blk.deleting) {
             // suggestion.content 现在是 agent 给的纯文本，接受时再转 xml（见 acceptSuggestion）。
             blk.suggestion = {
               content: r.content,
@@ -190,6 +192,7 @@ function acceptSuggestion(blockId) {
   b.text = b.suggestion.content
   b.pending_xml = textToBlockXml(b.kind, b.text)
   b.edited = true
+  b.deleting = false // 接受建议=非删除编辑，覆盖删除意图，避免 pending_xml 非空但 deleting=true 的不一致
   b.suggestion.state = 'accepted'
 }
 
@@ -206,6 +209,7 @@ function editBlock(blockId, newText) {
   b.text = newText
   b.pending_xml = textToBlockXml(b.kind, newText)
   b.edited = true
+  b.deleting = false // 手编=非删除编辑，覆盖删除意图，避免状态不一致
 }
 
 // 还原：text/raw_xml 恢复原始，edited=false，pending_xml=null，suggestion=null。
@@ -216,6 +220,18 @@ function resetBlock(blockId) {
   b.raw_xml = b.original_xml
   b.edited = false
   b.pending_xml = null
+  b.suggestion = null
+  b.deleting = false
+}
+
+// 删除整块：置空 pending_xml（写回走 block_delete），标记 deleting + edited。
+// 不立即从列表移除：保留可见（置灰+删除线）直到写回成功重 load 后自然消失。
+function deleteBlock(blockId) {
+  const b = findBlock(blockId)
+  if (!b) return
+  b.deleting = true
+  b.edited = true
+  b.pending_xml = ''
   b.suggestion = null
 }
 
@@ -340,6 +356,7 @@ function onOpenExternal() {
           @accept-suggestion="acceptSuggestion"
           @reject-suggestion="rejectSuggestion"
           @reset-block="resetBlock"
+          @delete-block="deleteBlock"
           @edit-block="editBlock"
           @load-recent="loadRecent"
           @remove-recent="onRemoveRecent"
