@@ -2,6 +2,12 @@
 import { ref, computed } from 'vue'
 import { loadDoc, chatAgent, applyEdits } from './api.js'
 import { textToBlockXml } from './blockXml.js'
+import {
+  onBlocksChanged as updateBlocksChanged,
+  onChangeBlockKind as updateBlockKind,
+  onMergeBlocks as mergeBlocks,
+  onSplitBlock as splitBlock,
+} from './appBlockHandlers.js'
 import { recordRecent, listRecent, removeRecent } from './recentDocs.js'
 import TopBar from './components/TopBar.vue'
 import DocPane from './components/DocPane.vue'
@@ -219,6 +225,29 @@ function resetBlock(blockId) {
   b.suggestion = null
 }
 
+// 拆块：光标处把原块 text 切成 textBefore（留原块）+ textAfter（新块，同 kind）。
+// 两块均 edited + pending_xml。cursorPos 由 DocPane 传入仅供参考，拆分结果以 textBefore/textAfter 为准。
+function onSplitBlock(blockId, cursorPos, textBefore, textAfter) {
+  blocks.value = splitBlock(blocks.value, blockId, cursorPos, textBefore, textAfter, textToBlockXml)
+}
+
+// 合块：current.text 追加到 previous.text 末尾并移除 current；previous edited + pending_xml。
+// 注意：pending_xml 必须按合并后文本重新生成，否则 onApply 会把空 pending_xml 当 block_delete。
+function onMergeBlocks(currentBlockId, previousBlockId) {
+  blocks.value = mergeBlocks(blocks.value, currentBlockId, previousBlockId, textToBlockXml)
+}
+
+// 改块类型：同时更新 kind 与 text，按新 kind 生成 pending_xml，edited=true。
+function onChangeBlockKind(blockId, newKind, cleanedText) {
+  blocks.value = updateBlockKind(blocks.value, blockId, newKind, cleanedText, textToBlockXml)
+}
+
+// 批量更新块文本：updates = [{block_id, text}, ...]（兼容 blockId）。
+// 每块 text 落库 + 按 kind 生成 pending_xml + edited=true。
+function onBlocksChanged(updates) {
+  blocks.value = updateBlocksChanged(blocks.value, updates, textToBlockXml)
+}
+
 // §5.2 写回后重新 load 是核心修复：block-id 写回后必变（飞书硬约束），
 // 必须 re-fetch 刷新 block-id + revision_id，否则下次写回用失效旧 id。
 async function onApply() {
@@ -344,6 +373,10 @@ function onOpenExternal() {
           @load-recent="loadRecent"
           @remove-recent="onRemoveRecent"
           @open-search="searchOpen = true"
+          @split-block="onSplitBlock"
+          @merge-blocks="onMergeBlocks"
+          @change-block-kind="onChangeBlockKind"
+          @blocks-changed="onBlocksChanged"
         />
         <AgentPane
           :loaded="loaded"

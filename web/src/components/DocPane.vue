@@ -1,5 +1,6 @@
 <script setup>
-import { ref, computed, watch, nextTick } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { iconFor, isEditable, labelFor, matchMarkdownShortcut, tagFor, truncate } from './docPaneHelpers.js'
 
 const props = defineProps({
   loaded: { type: Boolean, required: true },
@@ -17,70 +18,278 @@ const emit = defineEmits([
   'load-recent',
   'remove-recent',
   'open-search',
+  // 新增（单一 contenteditable 架构）
+  'split-block',
+  'merge-blocks',
+  'change-block-kind',
+  'blocks-changed',
 ])
 
-// P2 §5.3：收紧可编辑范围。title 改只读（block_replace 行为不确定，见 §6）。
-// 可编辑：h1-h4 / p / ul / ol / pre。
-const EDITABLE_KINDS = new Set(['h1', 'h2', 'h3', 'h4', 'p', 'ul', 'ol', 'pre'])
+const editorRef = ref(null) // 单一 contenteditable 容器
+const editorShellRef = ref(null) // 定位祖先（浮动还原按钮参考系）
 
-function isEditable(kind) {
-  return EDITABLE_KINDS.has(kind)
-}
-
-// contenteditable 用哪种标签渲染
-function tagFor(kind) {
-  switch (kind) {
-    case 'h1':
-      return 'h1'
-    case 'h2':
-      return 'h2'
-    case 'h3':
-      return 'h3'
-    case 'h4':
-      return 'h4'
-    case 'pre':
-      return 'pre'
-    default:
-      return 'div' // p / ul / ol
-  }
-}
-
-// 正在编辑的块下标（防止 watcher 把用户未提交的输入覆盖掉）
+// 当前聚焦块下标（-1 表示无聚焦）。用于：
+//  - 跳过 watcher 对聚焦块的 text 同步（避免覆盖光标位置）
+//  - 显示浮动还原按钮
 const focusedIndex = ref(-1)
 // 从右栏「定位到文档」时短暂高亮的块下标
 const highlightedIndex = ref(-1)
+// 浮动还原按钮位置（top:-9999 表示隐藏）
+const resetBtnPos = ref({ top: -9999, left: 0 })
 
-function onFocus(i) {
-  focusedIndex.value = i
-}
-// P2：blur 发的是纯文本（非 markdown），父组件按 kind 生成 xml。
-// contenteditable 清空后 innerText 常为 "\n"（残留 <br>），归一化为空串 → 走 block_delete（删整块）。
-function onBlur(i, block, e) {
-  focusedIndex.value = -1
-  const raw = e.target.innerText
-  const text = raw === '\n' || raw.trim() === '' ? '' : raw
-  emit('edit-block', block.block_id, text)
-}
-
-// 当 block.text 被外部改变（接受建议 / 还原 / blur 回写）时，把 contenteditable
-// 文本同步成最新值；正在编辑的块跳过。用 text 签名做浅 watch，避免每个属性变更都重扫。
-const blockTextSignature = computed(() =>
-  props.blocks.map((b) => b.text).join('\n')
+const focusedBlock = computed(() =>
+  focusedIndex.value >= 0 ? props.blocks[focusedIndex.value] : null
 )
-function syncAll() {
-  for (let i = 0; i < props.blocks.length; i++) {
+
+// ─── 工具：定位光标所在 block 元素 ───
+function getCurrentBlockEl() {
+  const sel = window.getSelection()
+  if (!sel || !sel.rangeCount) return null
+  let node = sel.anchorNode
+  const editor = editorRef.value
+  while (node && node !== editor) {
+    if (node.dataset && node.dataset.blockId !== undefined) return node
+    node = node.parentNode
+  }
+  return null
+}
+
+// 判断元素是否为可编辑块（有 data-block-id 且未标记 contenteditable=false）
+function isEditableBlockEl(el) {
+  return !!el && el.hasAttribute('data-block-id') && el.getAttribute('contenteditable') !== 'false'
+}
+
+function getPreviousEditableBlockEl(el) {
+  let prev = el.previousElementSibling
+  while (prev) {
+    if (isEditableBlockEl(prev)) return prev
+    prev = prev.previousElementSibling
+  }
+  return null
+}
+function getNextEditableBlockEl(el) {
+  let next = el.nextElementSibling
+  while (next) {
+    if (isEditableBlockEl(next)) return next
+    next = next.nextElementSibling
+  }
+  return null
+}
+
+// 光标在 block 内的字符偏移
+function getCaretOffsetWithin(blockEl, range) {
+  const preRange = range.cloneRange()
+  preRange.selectNodeContents(blockEl)
+  preRange.setEnd(range.endContainer, range.endOffset)
+  return preRange.toString().length
+}
+// 光标是否在 block 起始（前面无文本）
+function isCaretAtBlockStart(blockEl, range) {
+  if (!range.collapsed) return false
+  const preRange = range.cloneRange()
+  preRange.selectNodeContents(blockEl)
+  preRange.setEnd(range.endContainer, range.endOffset)
+  return preRange.toString() === ''
+}
+// 光标是否在 block 第一行（块首→上箭头应跳上一块）
+function isCaretOnFirstLine(blockEl, range) {
+  const testRange = document.createRange()
+  testRange.selectNodeContents(blockEl)
+  testRange.setEnd(range.endContainer, range.endOffset)
+  return testRange.getClientRects().length <= 1
+}
+// 光标是否在 block 最后一行（块末→下箭头应跳下一块）
+function isCaretOnLastLine(blockEl, range) {
+  const testRange = document.createRange()
+  testRange.selectNodeContents(blockEl)
+  testRange.setStart(range.endContainer, range.endOffset)
+  return testRange.getClientRects().length <= 1
+}
+
+function placeCaretAtEnd(el) {
+  const range = document.createRange()
+  range.selectNodeContents(el)
+  range.collapse(false)
+  const sel = window.getSelection()
+  sel.removeAllRanges()
+  sel.addRange(range)
+}
+function placeCaretAtStart(el) {
+  const range = document.createRange()
+  range.selectNodeContents(el)
+  range.collapse(true)
+  const sel = window.getSelection()
+  sel.removeAllRanges()
+  sel.addRange(range)
+}
+
+// ─── keydown：Enter / Backspace / ArrowUp / ArrowDown ───
+function onKeydown(e) {
+  const blockEl = getCurrentBlockEl()
+  if (!blockEl || !isEditableBlockEl(blockEl)) return
+
+  const sel = window.getSelection()
+  if (!sel || !sel.rangeCount) return
+  const range = sel.getRangeAt(0)
+
+  // Enter：分裂 block（pre 例外，插入换行）
+  if (e.key === 'Enter' && !e.shiftKey) {
+    if (blockEl.dataset.kind === 'pre') {
+      e.preventDefault()
+      document.execCommand('insertText', false, '\n')
+      scheduleSync()
+      return
+    }
+    e.preventDefault()
+    const cursorPos = getCaretOffsetWithin(blockEl, range)
+    const fullText = blockEl.innerText
+    const textBefore = fullText.slice(0, cursorPos)
+    const textAfter = fullText.slice(cursorPos)
+    emit('split-block', blockEl.dataset.blockId, cursorPos, textBefore, textAfter)
+    return
+  }
+
+  // Backspace：块首且有上一可编辑块 → 合并
+  if (e.key === 'Backspace') {
+    if (!isCaretAtBlockStart(blockEl, range)) return
+    const prev = getPreviousEditableBlockEl(blockEl)
+    if (!prev) return
+    e.preventDefault()
+    emit('merge-blocks', blockEl.dataset.blockId, prev.dataset.blockId)
+    return
+  }
+
+  // ArrowUp / ArrowDown：跨 block 移动
+  if (e.key === 'ArrowUp' && isCaretOnFirstLine(blockEl, range)) {
+    const prev = getPreviousEditableBlockEl(blockEl)
+    if (prev) {
+      e.preventDefault()
+      placeCaretAtEnd(prev)
+      nextTick(updateResetBtnPos)
+    }
+    return
+  }
+  if (e.key === 'ArrowDown' && isCaretOnLastLine(blockEl, range)) {
+    const next = getNextEditableBlockEl(blockEl)
+    if (next) {
+      e.preventDefault()
+      placeCaretAtStart(next)
+      nextTick(updateResetBtnPos)
+    }
+    return
+  }
+}
+
+// ─── input：Markdown 快捷输入 + debounce 同步 ───
+function onInput() {
+  const blockEl = getCurrentBlockEl()
+  if (!blockEl || !isEditableBlockEl(blockEl)) {
+    scheduleSync()
+    return
+  }
+  const text = blockEl.innerText
+  const shortcut = matchMarkdownShortcut(text)
+  if (shortcut && blockEl.dataset.kind !== shortcut.kind) {
+    emit('change-block-kind', blockEl.dataset.blockId, shortcut.kind, shortcut.cleaned)
+    // 乐观更新本地文本（移除前缀），避免 App.vue 未接入时残留 "# "
+    blockEl.innerText = shortcut.cleaned
+    placeCaretAtStart(blockEl)
+    return
+  }
+  scheduleSync()
+  nextTick(updateResetBtnPos)
+}
+
+// ─── debounce 300ms 收集变更，比对 props 后 emit ───
+let syncTimer = null
+function scheduleSync() {
+  if (syncTimer) clearTimeout(syncTimer)
+  syncTimer = setTimeout(() => {
+    syncTimer = null
+    flushChanges()
+  }, 300)
+}
+
+function flushChanges() {
+  const editor = editorRef.value
+  if (!editor) return
+  const blockEls = editor.querySelectorAll('[data-block-id]')
+  const changed = []
+  for (let i = 0; i < props.blocks.length && i < blockEls.length; i++) {
+    const el = blockEls[i]
+    if (!isEditableBlockEl(el)) continue
     const b = props.blocks[i]
-    if (!isEditable(b.kind)) continue
-    const el = document.getElementById('editable-' + i)
-    if (!el) continue
-    if (focusedIndex.value === i) continue
-    // P2：直接显示 block.text（纯文本），无需剥除 markdown 前缀。
+    const raw = el.innerText
+    // contenteditable 清空后 innerText 常为 "\n"（残留 <br>），归一化为空串 → 走 block_delete
+    const text = raw === '\n' || raw.trim() === '' ? '' : raw
+    if (text !== b.text) {
+      changed.push({ block_id: b.block_id, text, kind: el.dataset.kind })
+    }
+  }
+  if (changed.length > 0) emit('blocks-changed', changed)
+}
+
+// ─── 文本同步 watcher：外部变更（接受建议 / 还原 / 写回刷新）同步到 DOM ───
+// 签名含 kind + text + block_id，覆盖文本变化、kind 变化、结构变化。
+// 只在非聚焦块上同步，避免覆盖光标位置；聚焦块若因 kind 变化被 Vue 重建为空壳则补写文本。
+const blockSignature = computed(() =>
+  props.blocks.map((b) => JSON.stringify([b.kind, b.text, b.block_id || ''])).join('\n')
+)
+function syncBlockTexts() {
+  const editor = editorRef.value
+  if (!editor) return
+  const blockEls = editor.querySelectorAll('[data-block-id]')
+  const focused = getCurrentBlockEl()
+  for (let i = 0; i < props.blocks.length && i < blockEls.length; i++) {
+    const el = blockEls[i]
+    const b = props.blocks[i]
+    if (!isEditableBlockEl(el)) continue
+    if (el === focused) {
+      // 聚焦块：仅在 Vue 因 kind 变化重建出空壳时补写（避免光标丢失）
+      if (el.innerText === '' && b.text !== '') {
+        el.innerText = b.text
+        placeCaretAtEnd(el)
+      }
+      continue
+    }
     if (el.innerText !== b.text) el.innerText = b.text
   }
 }
-watch(blockTextSignature, () => nextTick(syncAll), { immediate: true })
+watch(blockSignature, () => nextTick(syncBlockTexts), { immediate: true })
 
-// 暴露给 App.vue：从右栏摘要定位到左栏对应 block（滚动 + 高亮）
+// ─── 聚焦 / 失焦：维护 focusedIndex + 浮动按钮位置 ───
+function onEditorFocusIn() {
+  const el = getCurrentBlockEl()
+  focusedIndex.value = el && el.dataset.index != null ? Number(el.dataset.index) : -1
+  nextTick(updateResetBtnPos)
+}
+function onEditorFocusOut() {
+  // 延迟检测：点击还原按钮时 activeElement 会短暂离开 editor
+  setTimeout(() => {
+    if (!editorRef.value || !editorRef.value.contains(document.activeElement)) {
+      focusedIndex.value = -1
+      resetBtnPos.value = { top: -9999, left: 0 }
+    }
+  }, 0)
+}
+
+function updateResetBtnPos() {
+  if (focusedIndex.value < 0 || !editorShellRef.value || !editorRef.value) {
+    resetBtnPos.value = { top: -9999, left: 0 }
+    return
+  }
+  const el = editorRef.value.querySelector('[data-index="' + focusedIndex.value + '"]')
+  if (!el) return
+  const shellRect = editorShellRef.value.getBoundingClientRect()
+  const r = el.getBoundingClientRect()
+  resetBtnPos.value = { top: r.top - shellRect.top + 2, left: r.right - shellRect.left - 58 }
+}
+
+function onResetFocused() {
+  if (focusedBlock.value) emit('reset-block', focusedBlock.value.block_id)
+}
+
+// ─── 暴露给 App.vue：从右栏摘要定位到左栏对应 block（滚动 + 高亮）───
 function scrollToBlock(blockId) {
   const idx = props.blocks.findIndex((b) => b.block_id === blockId)
   if (idx < 0) return
@@ -93,41 +302,14 @@ function scrollToBlock(blockId) {
 }
 defineExpose({ scrollToBlock })
 
-// 只读块占位
-function iconFor(kind) {
-  return (
-    {
-      title: 'title',
-      table: 'table_chart',
-      figure: 'image',
-      img: 'image',
-      callout: 'campaign',
-      grid: 'grid_on',
-      bookmark: 'bookmark',
-      cite: 'format_quote',
-      hr: 'horizontal_rule',
-    }[kind] || 'widgets'
-  )
-}
-function labelFor(kind) {
-  return (
-    {
-      title: '文档标题',
-      table: '表格',
-      figure: '图片/附件',
-      img: '图片',
-      callout: '提示块',
-      grid: '多维表格',
-      bookmark: '书签',
-      cite: '引用',
-      hr: '分隔线',
-    }[kind] || kind
-  )
-}
-function truncate(s, n) {
-  if (!s) return ''
-  return s.length > n ? s.slice(0, n) + '…' : s
-}
+onMounted(() => {
+  window.addEventListener('resize', updateResetBtnPos)
+})
+onUnmounted(() => {
+  window.removeEventListener('resize', updateResetBtnPos)
+  if (syncTimer) clearTimeout(syncTimer)
+})
+
 </script>
 
 <template>
@@ -196,8 +378,8 @@ function truncate(s, n) {
       {{ loadError }}
     </div>
 
-    <!-- 文档正文：逐 block 渲染 -->
-    <div class="flex-1 overflow-y-auto px-10 py-8 relative">
+    <!-- 文档正文：单一 contenteditable 容器 -->
+    <div class="flex-1 overflow-y-auto px-10 py-8 relative" @scroll="updateResetBtnPos">
       <div v-if="!loaded" class="mt-10 max-w-xl mx-auto">
         <div class="text-center">
           <span
@@ -287,83 +469,121 @@ function truncate(s, n) {
         </p>
       </div>
 
-      <div v-else class="max-w-3xl mx-auto flex flex-col gap-3 markdown-body">
-        <div
-          v-for="(block, i) in blocks"
-          :key="i"
-          :id="'doc-block-' + i"
-          class="doc-block"
-          :class="{ 'doc-block--highlight': highlightedIndex === i }"
-        >
-          <!-- 可编辑块 -->
-          <div v-if="isEditable(block.kind)" class="editable-wrap">
-            <div class="editable-row">
-              <component
-                :is="tagFor(block.kind)"
-                contenteditable="true"
-                spellcheck="false"
-                :id="'editable-' + i"
-                :data-kind="block.kind"
-                class="editable-content"
-                :class="['kind-' + block.kind, { 'is-edited': block.edited }]"
-                @focus="onFocus(i)"
-                @blur="onBlur(i, block, $event)"
-              ></component>
-              <button
-                v-if="block.edited"
-                class="reset-btn"
-                title="还原该块为加载时的内容"
-                @click="$emit('reset-block', block.block_id)"
-              >
-                <span class="material-symbols-outlined text-[15px]">restart_alt</span>还原
-              </button>
-            </div>
-          </div>
-
-          <!-- 只读：hr 渲染为分隔线 -->
-          <div v-else-if="block.kind === 'hr'" class="readonly-hr">
-            <hr />
-          </div>
-
-          <!-- 只读：文档标题（P2 标只读不可 block_replace，但仍作大标题展示） -->
-          <h1
-            v-else-if="block.kind === 'title'"
-            class="kind-title readonly-title"
-            :title="'文档标题，只读'"
-          >{{ block.text }}</h1>
-
-          <!-- 只读占位：table/figure/img/callout/grid/bookmark/cite -->
-          <div v-else class="readonly-block">
-            <span class="material-symbols-outlined readonly-icon">{{ iconFor(block.kind) }}</span>
-            <span class="readonly-label">{{ labelFor(block.kind) }}</span>
-            <span class="readonly-text">{{ truncate(block.text, 60) }}</span>
-          </div>
-
-          <!-- 待处理建议预览（接受/拒绝） -->
+      <!--
+        单一 contenteditable：所有 block 均为容器直接子元素。
+        - 可编辑块：无 contenteditable 属性（继承 true），文本由 JS 同步（避免 Vue 绑定覆盖光标）。
+        - 只读块：contenteditable="false" 非编辑岛屿。
+        - suggestion 卡片：同样作为 contenteditable="false" 岛屿紧跟对应 block。
+          （spec 原文「容器外部」在单一 contenteditable + 「跟在对应 block 后面」约束下不可行，
+          非编辑岛屿是保持视觉顺序的唯一可行方式，语义等价于「不参与编辑文本流」。）
+      -->
+      <div v-else class="max-w-3xl mx-auto">
+        <div ref="editorShellRef" class="editor-shell markdown-body">
           <div
-            v-if="block.suggestion && block.suggestion.state === 'pending'"
-            class="suggestion-card"
+            ref="editorRef"
+            contenteditable="true"
+            spellcheck="false"
+            class="editor-surface"
+            @keydown="onKeydown"
+            @input="onInput"
+            @focusin="onEditorFocusIn"
+            @focusout="onEditorFocusOut"
           >
-            <div class="suggestion-head">
-              <span class="material-symbols-outlined suggestion-icon">edit_note</span>
-              <span class="suggestion-reason">{{ block.suggestion.reason || '修改建议' }}</span>
-            </div>
-            <pre class="suggestion-content">{{ block.suggestion.content }}</pre>
-            <div class="suggestion-actions">
-              <button
-                class="btn-reject"
-                @click="$emit('reject-suggestion', block.block_id)"
+            <template v-for="(block, i) in blocks" :key="block.block_id || ('i-' + i)">
+              <!-- 可编辑块：空壳元素，文本由 syncBlockTexts 写入 -->
+              <component
+                v-if="isEditable(block.kind)"
+                :is="tagFor(block.kind)"
+                :id="'doc-block-' + i"
+                :data-block-id="block.block_id"
+                :data-kind="block.kind"
+                :data-index="i"
+                class="editable-content"
+                :class="['kind-' + block.kind, { 'is-edited': block.edited, 'doc-block--highlight': highlightedIndex === i }]"
+              />
+
+              <!-- 只读：文档标题 -->
+              <h1
+                v-else-if="block.kind === 'title'"
+                :id="'doc-block-' + i"
+                :data-block-id="block.block_id"
+                :data-kind="block.kind"
+                :data-index="i"
+                contenteditable="false"
+                class="kind-title readonly-title"
+                :class="{ 'doc-block--highlight': highlightedIndex === i }"
+                :title="'文档标题，只读'"
+              >{{ block.text }}</h1>
+
+              <!-- 只读：hr 分隔线 -->
+              <div
+                v-else-if="block.kind === 'hr'"
+                :id="'doc-block-' + i"
+                :data-block-id="block.block_id"
+                :data-kind="block.kind"
+                :data-index="i"
+                contenteditable="false"
+                class="readonly-hr"
+                :class="{ 'doc-block--highlight': highlightedIndex === i }"
               >
-                拒绝
-              </button>
-              <button
-                class="btn-accept"
-                @click="$emit('accept-suggestion', block.block_id)"
+                <hr />
+              </div>
+
+              <!-- 只读占位：table/figure/img/callout/grid/bookmark/cite -->
+              <div
+                v-else
+                :id="'doc-block-' + i"
+                :data-block-id="block.block_id"
+                :data-kind="block.kind"
+                :data-index="i"
+                contenteditable="false"
+                class="readonly-block"
+                :class="{ 'doc-block--highlight': highlightedIndex === i }"
               >
-                接受
-              </button>
-            </div>
+                <span class="material-symbols-outlined readonly-icon">{{ iconFor(block.kind) }}</span>
+                <span class="readonly-label">{{ labelFor(block.kind) }}</span>
+                <span class="readonly-text">{{ truncate(block.text, 60) }}</span>
+              </div>
+
+              <!-- 待处理建议预览（接受/拒绝）：非编辑岛屿，紧跟对应 block -->
+              <div
+                v-if="block.suggestion && block.suggestion.state === 'pending'"
+                contenteditable="false"
+                class="suggestion-card"
+              >
+                <div class="suggestion-head">
+                  <span class="material-symbols-outlined suggestion-icon">edit_note</span>
+                  <span class="suggestion-reason">{{ block.suggestion.reason || '修改建议' }}</span>
+                </div>
+                <pre class="suggestion-content">{{ block.suggestion.content }}</pre>
+                <div class="suggestion-actions">
+                  <button
+                    class="btn-reject"
+                    @click="$emit('reject-suggestion', block.block_id)"
+                  >
+                    拒绝
+                  </button>
+                  <button
+                    class="btn-accept"
+                    @click="$emit('accept-suggestion', block.block_id)"
+                  >
+                    接受
+                  </button>
+                </div>
+              </div>
+            </template>
           </div>
+
+          <!-- 浮动还原按钮：仅对聚焦的已编辑块显示 -->
+          <button
+            v-if="focusedBlock && focusedBlock.edited"
+            class="reset-btn reset-btn--floating"
+            :style="{ top: resetBtnPos.top + 'px', left: resetBtnPos.left + 'px' }"
+            title="还原该块为加载时的内容"
+            @mousedown.prevent="onResetFocused"
+          >
+            <span class="material-symbols-outlined text-[15px]">restart_alt</span>还原
+          </button>
         </div>
       </div>
     </div>
@@ -371,16 +591,25 @@ function truncate(s, n) {
 </template>
 
 <style scoped>
-.doc-block {
+/* 单一 contenteditable 容器 */
+.editor-shell {
   position: relative;
-  border-radius: 6px;
-  padding: 2px 4px;
-  transition: box-shadow 0.2s ease;
 }
-.doc-block--highlight {
-  box-shadow: 0 0 0 2px var(--color-primary);
+.editor-surface {
+  outline: none;
+}
+/* 可编辑块在块流中的纵向间距（覆盖 .editable-content 的 margin:0 -6px） */
+.editor-surface > .editable-content {
+  display: block;
+  margin: 0.3em -6px;
 }
 
+.doc-block--highlight {
+  box-shadow: 0 0 0 2px var(--color-primary);
+  border-radius: 4px;
+}
+
+/* 旧逐 block 布局样式（保留以兼容，部分已不再使用） */
 .editable-wrap {
   position: relative;
 }
@@ -394,7 +623,6 @@ function truncate(s, n) {
   min-width: 0;
   outline: none;
   padding: 2px 6px;
-  margin: 0 -6px;
   border-radius: 4px;
   border-left: 3px solid transparent;
   transition: background 0.15s ease, border-color 0.15s ease;
@@ -476,6 +704,13 @@ function truncate(s, n) {
 .reset-btn:hover {
   background: var(--color-surface-container-high);
 }
+/* 浮动还原按钮：覆盖 margin-top，改为绝对定位 */
+.reset-btn--floating {
+  position: absolute;
+  z-index: 5;
+  margin-top: 0;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
+}
 
 /* 只读占位 */
 .readonly-hr {
@@ -495,6 +730,7 @@ function truncate(s, n) {
   background: var(--color-surface-container);
   color: var(--color-on-surface-variant);
   font-size: 13px;
+  margin: 0.3em 0;
 }
 .readonly-icon {
   font-size: 18px;
@@ -511,7 +747,7 @@ function truncate(s, n) {
   opacity: 0.8;
 }
 
-/* 建议预览卡片 */
+/* 建议预览卡片（非编辑岛屿） */
 .suggestion-card {
   margin: 6px 0 6px 18px;
   border-radius: 8px;
