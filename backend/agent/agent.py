@@ -4,7 +4,7 @@
 - agent 看到文档按 block 切分的纯文本（blocks_to_text）+ 用户指令
 - 通过 edit_document 工具产出一组 Replacement（pattern→content，纯文本替换语义，pattern 落单块 text 内）
 - 不立即写飞书：replacements 返回给前端，用户确认 diff 后由 /doc/apply 执行
-- 流式 yield 事件（thinking / text / tool_use / done），供 SSE 推送
+- 流式 yield 产品语义事件（thinking_summary / assistant_text / artifact / action_required / complete / error），供 SSE 推送
 """
 from __future__ import annotations
 
@@ -65,7 +65,7 @@ class Replacement:
 class AgentEvent:
     """流式事件，供 SSE 推送。"""
 
-    type: str  # thinking / text / tool_use / done / error
+    type: str  # thinking_summary / assistant_text / artifact / action_required / complete / error
     data: dict[str, Any]
 
     def as_sse(self) -> str:
@@ -199,7 +199,7 @@ def run_agent_stream(
 ) -> Iterator[AgentEvent]:
     """流式运行 agent，yield 事件。
 
-    事件类型：thinking / text（增量）/ tool_use / done（含 replacements）/ error。
+    事件类型：thinking_summary / assistant_text（增量）/ artifact / action_required / complete / error。
     doc_text 为按 block 切分的文档纯文本（blocks_to_text 输出），而非整篇 markdown。
     """
     try:
@@ -221,19 +221,22 @@ def run_agent_stream(
             replacements: list[Replacement] = []
             text_buf: list[str] = []
             current_tool_input: dict[str, Any] = {}
+            tool_called = False
             for event in stream:
                 et = event.type
                 if et == "content_block_start":
                     block = event.content_block
                     if block.type == "tool_use":
                         current_tool_input = {"name": block.name}
+                        if block.name == "edit_document":
+                            tool_called = True
                 elif et == "content_block_delta":
                     delta = event.delta
                     if delta.type == "thinking_delta":
-                        yield AgentEvent("thinking", {"text": delta.thinking})
+                        yield AgentEvent("thinking_summary", {"text": delta.thinking})
                     elif delta.type == "text_delta":
                         text_buf.append(delta.text)
-                        yield AgentEvent("text", {"text": delta.text})
+                        yield AgentEvent("assistant_text", {"text": delta.text})
                     elif delta.type == "input_json_delta":
                         current_tool_input.setdefault("_raw", "")
                         current_tool_input["_raw"] += delta.partial_json
@@ -250,17 +253,39 @@ def run_agent_stream(
                                         reason=r.get("reason", ""),
                                     )
                                 )
-                        except json.JSONDecodeError:
-                            pass
+                        except json.JSONDecodeError as e:
+                            # 模型产出截断/畸形 JSON（max_tokens 触顶、代理偶发）时显式报错，
+                            # 不静默吞掉 → 否则会产出 0 条 replacements 却继续发 artifact + action_required。
+                            yield AgentEvent(
+                                "error",
+                                {"message": f"工具输出解析失败(edit_document): {e}"},
+                            )
+                            return
                         current_tool_input = {}
+            # 模型未调用 edit_document 工具 → 契约违规，显式报错而非空 artifact + bare complete。
+            if not tool_called:
+                yield AgentEvent(
+                    "error",
+                    {"message": "模型未产出修改建议（未调用 edit_document）"},
+                )
+                return
             final_text = "".join(text_buf)
-            yield AgentEvent("done", {
-                "replacements": [
-                    {"pattern": r.pattern, "content": r.content, "reason": r.reason}
-                    for r in replacements
-                ],
-                "final_text": final_text,
+            yield AgentEvent("artifact", {
+                "artifact_type": "document_edits",
+                "title": "修改建议",
+                "summary": f"{len(replacements)} 处修改建议",
+                "payload": {
+                    "replacements": [
+                        {"pattern": r.pattern, "content": r.content, "reason": r.reason}
+                        for r in replacements
+                    ],
+                    "final_text": final_text,
+                },
             })
+            # 仅在有实际替换时才请求写回确认；0 条替换无内容可写回。
+            if replacements:
+                yield AgentEvent("action_required", {"reason": "writeback_confirmation"})
+            yield AgentEvent("complete", {})
     except anthropic.APIError as exc:
         yield AgentEvent("error", {"message": f"LLM 调用失败: {exc}"})
 
@@ -281,13 +306,18 @@ def run_solution_stream(
     docs: list[dict[str, Any]],
     messages: list[dict[str, Any]],
     *,
+    has_previous_solution: bool = False,
     model: str | None = None,
 ) -> Iterator[AgentEvent]:
     """方案构建模式：基于多份文档 + 多轮对话，流式产出/更新 Solution。
 
     docs: [{url, markdown}, ...]
     messages: [{role: 'user'|'assistant', content: str}, ...]
-    事件类型：thinking / text / done（含 solution: {title, markdown, summary}）/ error。
+    has_previous_solution: 是否存在上一版方案（非首轮）。由调用方根据 messages
+        长度判断；为 True 时流结束发 action_required(overwrite_solution_confirmation)，
+        首轮不发。
+    事件类型：thinking_summary / assistant_text（增量）/ artifact / action_required
+        / complete / error。
     """
     try:
         client = _make_client()
@@ -320,7 +350,6 @@ def run_solution_stream(
             messages=chat_messages,
             **_thinking_kwargs(8192),
         ) as stream:
-            text_buf: list[str] = []
             current_tool_input: dict[str, Any] = {}
             solution: Solution | None = None
             for event in stream:
@@ -332,10 +361,9 @@ def run_solution_stream(
                 elif et == "content_block_delta":
                     delta = event.delta
                     if delta.type == "thinking_delta":
-                        yield AgentEvent("thinking", {"text": delta.thinking})
+                        yield AgentEvent("thinking_summary", {"text": delta.thinking})
                     elif delta.type == "text_delta":
-                        text_buf.append(delta.text)
-                        yield AgentEvent("text", {"text": delta.text})
+                        yield AgentEvent("assistant_text", {"text": delta.text})
                     elif delta.type == "input_json_delta":
                         current_tool_input.setdefault("_raw", "")
                         current_tool_input["_raw"] += delta.partial_json
@@ -349,17 +377,37 @@ def run_solution_stream(
                                 markdown=str(parsed.get("markdown", "")),
                                 summary=str(parsed.get("summary", "")),
                             )
-                        except json.JSONDecodeError:
-                            pass
+                        except json.JSONDecodeError as e:
+                            # 模型产出截断/畸形 JSON 时显式报错，不发 bare complete。
+                            yield AgentEvent(
+                                "error",
+                                {"message": f"工具输出解析失败(produce_solution): {e}"},
+                            )
+                            return
                         current_tool_input = {}
-            final_text = "".join(text_buf)
-            done_payload: dict[str, Any] = {"final_text": final_text}
-            if solution is not None:
-                done_payload["solution"] = {
+            # 模型未调用 produce_solution（system prompt 要求每轮必调，但模型可能违反）
+            # 或 JSON 解析失败已 return → solution 仍为 None 时显式报错，避免 bare complete。
+            if solution is None:
+                yield AgentEvent(
+                    "error",
+                    {"message": "模型未产出方案（未调用 produce_solution）"},
+                )
+                return
+            yield AgentEvent("artifact", {
+                "artifact_type": "solution",
+                "title": solution.title,
+                "summary": solution.summary,
+                "payload": {
                     "title": solution.title,
                     "markdown": solution.markdown,
                     "summary": solution.summary,
-                }
-            yield AgentEvent("done", done_payload)
+                },
+            })
+            if has_previous_solution:
+                yield AgentEvent(
+                    "action_required",
+                    {"reason": "overwrite_solution_confirmation"},
+                )
+            yield AgentEvent("complete", {})
     except anthropic.APIError as exc:
         yield AgentEvent("error", {"message": f"LLM 调用失败: {exc}"})

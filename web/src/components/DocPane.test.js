@@ -82,4 +82,13 @@ describe('DocPane 渲染', () => {
     expect(card.text()).toContain('建议理由')
     expect(card.text()).toContain('建议正文')
   })
+
+  it('选择格式后点击导出会发出 export-doc 事件', async () => {
+    const wrapper = mountDocPane([{ block_id: 'b1', kind: 'p', text: '正文' }])
+
+    await wrapper.find('[data-test="export-format"]').setValue('docx')
+    await wrapper.find('[data-test="export-doc"]').trigger('click')
+
+    expect(wrapper.emitted('export-doc')).toEqual([['docx']])
+  })
 })

@@ -6,37 +6,65 @@ import {
   exportMd,
   saveWorkspace,
 } from '../api.js'
+import { createTimeline, mapSseEvent } from '../composables/useTimeline.js'
 import DocSearchPanel from './DocSearchPanel.vue'
+import ConversationTimeline from './timeline/ConversationTimeline.vue'
+import ArtifactDrawer from './artifact/ArtifactDrawer.vue'
 
 /**
- * 方案构建模式：
- * - 左栏：上下文文档列表（可加载多份飞书文档）
- * - 右栏：与 agent 对话；agent 通过 produce_solution 工具产出/更新方案 markdown
+ * 方案构建模式（P3 workspace 集成）：
+ * - 左侧主画布：tab 切换「当前方案 / 上下文文档」。当前方案渲染 solution.markdown；
+ *   上下文文档保留加载 / 搜索导入 / 删除 / 展开能力。上下文文档不再压缩 timeline。
+ * - 右侧 agent timeline 协作侧栏：顶部工具条（会话名/保存/清空）+ ConversationTimeline + 底部输入区。
+ * - artifact drawer：从右侧抽屉展开，不永久挤压画布。
+ *
+ * 数据流：
+ *   onSend → timeline.pushUser + messages.push(user) → chatSolution(SSE)
+ *         → mapSseEvent 把 status/assistant_text/thinking_summary/artifact/... 落进 timeline
+ *         → artifact(solution) 经 onSolution 回调更新主画布 solution.value
+ *   下一轮 onSend 前 mergePendingAssistant() 把上一轮 assistant_text 合并回 messages
+ *   （thinking_summary 不进 messages，与旧实现一致：后端只收 role+content）
  */
 
-const docs = ref([]) // [{url, markdown, error}]
+// ===== timeline（统一数据模型） =====
+const timeline = createTimeline()
+// timeline.items 是嵌套在普通对象里的 ref，模板里需用顶层别名才能自动解包
+const timelineItems = timeline.items
+
+// ===== 上下文文档 =====
+const docs = ref([]) // [{url, markdown, block_count}]
 const newUrl = ref('')
 const adding = ref(false)
 const addError = ref('')
 
-const messages = ref([]) // [{role, content, thinking?}]
+// ===== 对话 / 方案 =====
+// messages: 后端上下文 [{role, content}]。user 直接 push；
+// assistant 在「下一轮 onSend / 保存」前由 mergePendingAssistant 从 timeline 合并回来。
+const messages = ref([])
 const inputText = ref('')
 const running = ref(false)
 const chatError = ref('')
-
-// 当前最新一版方案
 const solution = ref(null) // {title, markdown, summary}
 
-// 流式中正在累积的 assistant 消息（占位）
-const streamingMsg = ref(null)
+// 已合并进 messages 的最大 timeline item id —— 用于「上一轮 assistant_text 合并回 messages」
+const lastMergedTimelineId = ref(0)
 
+// ===== 会话保存 =====
 const sessionName = ref('')
 const sessionId = ref(null)
 const saveStatus = ref('')
 
+// ===== 画布 tab =====
+const activeTab = ref('solution') // 'solution' | 'docs'
+
+// ===== artifact drawer =====
+const drawerArtifact = ref(null) // AgentArtifact | null
+const drawerIsLatest = ref(false)
+
 const totalChars = computed(() =>
   docs.value.reduce((sum, d) => sum + (d.markdown?.length || 0), 0),
 )
+const drawerOpen = computed(() => drawerArtifact.value !== null)
 
 function fileNameOf(md) {
   if (!md) return '未命名'
@@ -111,6 +139,23 @@ function toggleDoc(i) {
   expandedDoc.value = expandedDoc.value === i ? -1 : i
 }
 
+/**
+ * 把 timeline 中尚未合并的 assistant_text 合并进 messages（作为上一轮 assistant 回复）。
+ * thinking_summary 不进 messages（后端只收 role+content）。
+ * 在 onSend / onSaveSession 前调用，保证后端上下文与保存的会话包含 assistant 回复。
+ */
+function mergePendingAssistant() {
+  const pending = timelineItems.value.filter(
+    (it) => it.kind === 'assistant_text' && it.id > lastMergedTimelineId.value,
+  )
+  if (pending.length > 0) {
+    const text = pending.map((it) => it.text).join('')
+    if (text) messages.value.push({ role: 'assistant', content: text })
+  }
+  const maxId = timelineItems.value.reduce((m, it) => Math.max(m, it.id), 0)
+  lastMergedTimelineId.value = maxId
+}
+
 async function onSend() {
   const text = inputText.value.trim()
   if (!text || running.value) return
@@ -119,41 +164,36 @@ async function onSend() {
     return
   }
   chatError.value = ''
-  // 追加 user 消息
-  messages.value.push({ role: 'user', content: text })
-  inputText.value = ''
 
-  // 占位 assistant 消息
-  const placeholder = { role: 'assistant', content: '', thinking: '' }
-  streamingMsg.value = placeholder
-  messages.value.push(placeholder)
+  // 先把上一轮 assistant_text 合并回 messages，再做本轮 user 推入
+  mergePendingAssistant()
+
+  // user 同时进 messages（后端上下文）与 timeline（展示）
+  messages.value.push({ role: 'user', content: text })
+  timeline.pushUser(text)
+  inputText.value = ''
 
   running.value = true
   try {
     const docsPayload = docs.value.map((d) => ({ url: d.url, markdown: d.markdown }))
-    // 只传 role+content，不传 thinking
-    const msgPayload = messages.value
-      .filter((m) => m !== placeholder)
-      .map((m) => ({ role: m.role, content: m.content }))
+    const msgPayload = messages.value.map((m) => ({ role: m.role, content: m.content }))
 
     await chatSolution(docsPayload, msgPayload, (ev) => {
-      if (ev.type === 'thinking') {
-        placeholder.thinking = (placeholder.thinking || '') + ev.data.text
-      } else if (ev.type === 'text') {
-        placeholder.content = (placeholder.content || '') + ev.data.text
-      } else if (ev.type === 'done') {
-        if (ev.data.solution) {
-          solution.value = ev.data.solution
-        }
-      } else if (ev.type === 'error') {
-        chatError.value = ev.data.message
-      }
+      mapSseEvent(ev, timeline, {
+        onDocumentEdits: () => {},
+        onSolution: (payload) => {
+          solution.value = {
+            title: payload.title,
+            markdown: payload.markdown,
+            summary: payload.summary,
+          }
+        },
+      })
     })
   } catch (e) {
     chatError.value = e.message
   } finally {
     running.value = false
-    streamingMsg.value = null
   }
 }
 
@@ -163,10 +203,35 @@ function onExport() {
   exportMd(solution.value.markdown, fname + '.md')
 }
 
+// ConversationTimeline / ArtifactDrawer open-artifact(id) → 打开 drawer
+function onOpenArtifact(id) {
+  const item = timelineItems.value.find((it) => it.id === id)
+  if (item && item.kind === 'artifact') {
+    drawerArtifact.value = item.artifact
+    drawerIsLatest.value = !!item.isLatest
+  }
+}
+
+function onCloseDrawer() {
+  drawerArtifact.value = null
+  drawerIsLatest.value = false
+}
+
+// drawer SolutionArtifact overwrite-solution → 覆盖当前方案（仅 isLatest 启用）
+function onOverwriteFromDrawer() {
+  if (!drawerIsLatest.value || !drawerArtifact.value?.payload) return
+  const p = drawerArtifact.value.payload
+  solution.value = { title: p.title, markdown: p.markdown, summary: p.summary }
+}
+
+// action_required 未知 reason 的通用确认（workspace 模式仅 overwrite_solution_confirmation，故此分支不会触发）
+function onAction() {}
+
 async function onSaveSession() {
   if (saveStatus.value === 'saving') return
   saveStatus.value = 'saving'
   try {
+    mergePendingAssistant() // 保存前补齐最新 assistant 回复
     const name = sessionName.value.trim() || `会话 ${new Date().toLocaleString()}`
     const res = await saveWorkspace({
       sessionId: sessionId.value,
@@ -184,388 +249,390 @@ async function onSaveSession() {
 }
 
 function onClearChat() {
-  if (messages.value.length === 0 && !solution.value) return
+  if (timelineItems.value.length === 0 && messages.value.length === 0 && !solution.value) return
   if (!confirm('清空对话和当前方案？上下文文档会保留。')) return
+  timeline.reset()
   messages.value = []
   solution.value = null
   chatError.value = ''
+  lastMergedTimelineId.value = 0
+  drawerArtifact.value = null
+  drawerIsLatest.value = false
+}
+
+function tabStyle(tab) {
+  const active = activeTab.value === tab
+  return active
+    ? {
+        background: 'var(--color-surface-container-lowest)',
+        color: 'var(--color-primary)',
+      }
+    : {
+        background: 'transparent',
+        color: 'var(--color-on-surface-variant)',
+      }
 }
 </script>
 
 <template>
   <main class="flex-1 flex overflow-hidden">
-    <!-- 左栏：上下文文档列表 -->
+    <!-- 左侧：主画布（tab 切换当前方案 / 上下文文档） -->
     <section
-      class="w-[360px] flex flex-col shrink-0 border-r"
+      class="flex-1 flex flex-col min-w-0"
+      :style="{ background: 'var(--color-app-bg)' }"
+    >
+      <!-- tab 条 -->
+      <div
+        class="px-4 pt-3 flex items-end gap-1 shrink-0 border-b"
+        :style="{
+          background: 'var(--color-surface-container)',
+          borderColor: 'var(--color-outline-variant)',
+        }"
+      >
+        <button
+          @click="activeTab = 'solution'"
+          class="px-4 py-2 rounded-t-lg text-[13px] font-medium transition-colors flex items-center gap-2"
+          :style="tabStyle('solution')"
+        >
+          <span class="material-symbols-outlined text-[16px]">article</span>
+          当前方案
+          <span
+            v-if="solution"
+            class="px-1.5 py-0.5 rounded-sm text-[10px]"
+            :style="{
+              background: 'rgba(99, 14, 212, 0.1)',
+              color: 'var(--color-primary)',
+            }"
+            >最新</span
+          >
+        </button>
+        <button
+          @click="activeTab = 'docs'"
+          class="px-4 py-2 rounded-t-lg text-[13px] font-medium transition-colors flex items-center gap-2"
+          :style="tabStyle('docs')"
+        >
+          <span class="material-symbols-outlined text-[16px]">folder_open</span>
+          上下文文档
+          <span
+            class="px-1.5 py-0.5 rounded-sm text-[10px]"
+            :style="{
+              background: 'var(--color-surface-container-high)',
+              color: 'var(--color-on-surface-variant)',
+            }"
+            >{{ docs.length }}</span
+          >
+        </button>
+        <div class="ml-auto pb-1">
+          <button
+            v-if="activeTab === 'solution' && solution"
+            @click="onExport"
+            class="px-3 py-1.5 rounded text-[13px] font-medium transition-colors flex items-center gap-1"
+            :style="{
+              background: 'var(--color-secondary)',
+              color: 'var(--color-on-secondary)',
+            }"
+          >
+            <span class="material-symbols-outlined text-[16px]">download</span>
+            导出 .md
+          </button>
+        </div>
+      </div>
+
+      <!-- 当前方案 tab -->
+      <div
+        v-if="activeTab === 'solution'"
+        class="flex-1 overflow-y-auto"
+      >
+        <div
+          v-if="!solution"
+          class="h-full flex flex-col items-center justify-center text-center px-8"
+        >
+          <span
+            class="material-symbols-outlined text-[56px]"
+            :style="{ color: 'var(--color-outline-variant)' }"
+            >hub</span
+          >
+          <p
+            class="mt-4 text-sm"
+            :style="{ color: 'var(--color-on-surface-variant)' }"
+          >
+            {{
+              docs.length === 0
+                ? '先在「上下文文档」tab 添加至少一份飞书文档'
+                : '在右侧描述目标 / 提需求，Agent 产出的方案会显示在这里'
+            }}
+          </p>
+        </div>
+        <div v-else class="p-6 flex flex-col gap-3">
+          <div class="flex items-center gap-2 flex-wrap">
+            <h2
+              class="text-[18px] font-semibold"
+              :style="{ color: 'var(--color-on-surface)' }"
+            >
+              {{ solution.title || '当前方案' }}
+            </h2>
+            <span
+              v-if="solution.summary"
+              class="px-2 py-0.5 rounded-sm text-[11px]"
+              :style="{
+                background: 'rgba(99, 14, 212, 0.1)',
+                color: 'var(--color-primary)',
+              }"
+              >{{ solution.summary }}</span
+            >
+          </div>
+          <div
+            class="rounded-lg border p-5 whitespace-pre-wrap text-[13px] leading-relaxed"
+            style="font-family: 'JetBrains Mono', ui-monospace, monospace"
+            :style="{
+              background: 'var(--color-surface)',
+              borderColor: 'var(--color-outline-variant)',
+              color: 'var(--color-on-surface)',
+            }"
+          >{{ solution.markdown }}</div>
+        </div>
+      </div>
+
+      <!-- 上下文文档 tab -->
+      <div v-else class="flex-1 flex flex-col min-h-0">
+        <!-- URL 输入 -->
+        <div
+          class="px-4 py-3 shrink-0 flex flex-col gap-2 border-b"
+          :style="{ borderColor: 'var(--color-outline-variant)' }"
+        >
+          <div class="flex items-center justify-between">
+            <span
+              class="text-[12px]"
+              :style="{ color: 'var(--color-on-surface-variant)' }"
+            >
+              {{ docs.length }} 份 / {{ totalChars }} 字
+            </span>
+            <button
+              @click="onClearDocs"
+              :disabled="docs.length === 0"
+              class="text-[12px] px-2 py-0.5 rounded transition-colors hover:bg-[var(--color-surface-container)] disabled:opacity-40"
+              :style="{ color: 'var(--color-on-surface-variant)' }"
+            >
+              清空全部
+            </button>
+          </div>
+          <div class="flex gap-2">
+            <input
+              v-model="newUrl"
+              @keydown.enter="onAddDoc"
+              type="text"
+              placeholder="飞书文档 URL（docx / wiki）"
+              class="flex-1 px-2 py-1.5 text-[13px] border rounded focus:outline-none focus:ring-2"
+              :style="{
+                background: 'var(--color-surface-container-lowest)',
+                borderColor: 'var(--color-outline-variant)',
+                color: 'var(--color-on-surface)',
+              }"
+            />
+            <button
+              @click="onAddDoc"
+              :disabled="adding || !newUrl.trim()"
+              class="px-3 py-1.5 rounded text-[13px] font-medium transition-colors disabled:opacity-50 flex items-center gap-1"
+              :style="{
+                background: 'var(--color-primary)',
+                color: 'var(--color-on-primary)',
+              }"
+            >
+              <span class="material-symbols-outlined text-[16px]">{{
+                adding ? 'sync' : 'add'
+              }}</span>
+              {{ adding ? '加载中' : '添加' }}
+            </button>
+          </div>
+          <p
+            v-if="addError"
+            class="text-[12px]"
+            :style="{ color: 'var(--color-error)' }"
+          >
+            {{ addError }}
+          </p>
+        </div>
+
+        <!-- 搜索导入 -->
+        <div
+          class="px-4 py-3 border-b flex flex-col min-h-0 shrink-0"
+          :style="{
+            borderColor: 'var(--color-outline-variant)',
+            maxHeight: '38vh',
+            minHeight: '180px',
+          }"
+        >
+          <div class="flex items-center gap-1 mb-2 shrink-0">
+            <span
+              class="material-symbols-outlined text-[15px]"
+              :style="{ color: 'var(--color-primary)' }"
+              >search</span
+            >
+            <span
+              class="text-[12px] font-medium"
+              :style="{ color: 'var(--color-on-surface-variant)' }"
+              >搜索导入</span
+            >
+          </div>
+          <div class="flex-1 min-h-0 flex flex-col">
+            <DocSearchPanel compact @import="onImportFromSearch" />
+          </div>
+        </div>
+
+        <!-- 文档列表 -->
+        <div class="flex-1 overflow-y-auto p-3 flex flex-col gap-2">
+          <div
+            v-if="docs.length === 0"
+            class="text-center mt-8 text-[13px]"
+            :style="{ color: 'var(--color-on-surface-variant)' }"
+          >
+            先添加至少一份文档作为上下文
+          </div>
+          <div
+            v-for="(d, i) in docs"
+            :key="i"
+            class="rounded border overflow-hidden"
+            :style="{
+              background: 'var(--color-surface-container-lowest)',
+              borderColor: 'var(--color-outline-variant)',
+            }"
+          >
+            <div class="flex items-center justify-between px-3 py-2 gap-2">
+              <button
+                class="flex-1 text-left flex items-center gap-2 min-w-0"
+                @click="toggleDoc(i)"
+              >
+                <span
+                  class="material-symbols-outlined text-[16px] shrink-0"
+                  :style="{ color: 'var(--color-primary)' }"
+                  >description</span
+                >
+                <span
+                  class="truncate text-[13px] font-medium"
+                  :style="{ color: 'var(--color-on-surface)' }"
+                  >{{ fileNameOf(d.markdown) }}</span
+                >
+                <span
+                  class="shrink-0 text-[11px]"
+                  :style="{ color: 'var(--color-on-surface-variant)' }"
+                  >{{ d.markdown.length }} 字</span
+                >
+              </button>
+              <button
+                @click="onRemoveDoc(i)"
+                aria-label="删除"
+                class="p-1 rounded transition-colors hover:bg-[var(--color-surface-container)]"
+                :style="{ color: 'var(--color-on-surface-variant)' }"
+              >
+                <span class="material-symbols-outlined text-[16px]">close</span>
+              </button>
+            </div>
+            <div
+              v-if="expandedDoc === i"
+              class="px-3 py-2 text-[12px] whitespace-pre-wrap max-h-48 overflow-y-auto border-t"
+              :style="{
+                background: 'var(--color-surface-container)',
+                borderColor: 'var(--color-outline-variant)',
+                color: 'var(--color-on-surface-variant)',
+                fontFamily: 'JetBrains Mono, ui-monospace, monospace',
+              }"
+            >{{ d.markdown.slice(0, 800) }}{{ d.markdown.length > 800 ? '\n...' : '' }}</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 右侧：agent timeline 协作侧栏 -->
+    <section
+      class="w-[440px] shrink-0 flex flex-col border-l"
       :style="{
         background: 'var(--color-surface)',
         borderColor: 'var(--color-outline-variant)',
       }"
     >
-      <!-- 标题 + 清空 -->
+      <!-- 顶部工具条 -->
       <div
-        class="px-4 py-3 flex items-center justify-between shrink-0 border-b"
+        class="px-4 py-3 flex items-center justify-between gap-2 shrink-0 border-b"
         :style="{ borderColor: 'var(--color-outline-variant)' }"
       >
-        <div class="flex items-center gap-2">
-          <span
-            class="material-symbols-outlined text-[20px]"
-            :style="{ color: 'var(--color-primary)' }"
-            >folder_open</span
-          >
-          <h3
-            class="font-semibold text-[15px]"
-            :style="{ color: 'var(--color-on-surface)' }"
-          >
-            上下文文档
-          </h3>
-          <span
-            class="text-[12px]"
-            :style="{ color: 'var(--color-on-surface-variant)' }"
-          >
-            {{ docs.length }} 份 / {{ totalChars }} 字
-          </span>
-        </div>
+        <input
+          v-model="sessionName"
+          type="text"
+          placeholder="会话名称（可选）"
+          class="flex-1 min-w-0 px-2 py-1 text-[13px] border rounded bg-transparent focus:outline-none focus:ring-1"
+          :style="{
+            borderColor: 'var(--color-outline-variant)',
+            color: 'var(--color-on-surface)',
+          }"
+        />
+        <span
+          v-if="saveStatus"
+          class="text-[12px] shrink-0"
+          :style="{ color: 'var(--color-on-surface-variant)' }"
+          >{{ saveStatus }}</span
+        >
         <button
-          @click="onClearDocs"
-          :disabled="docs.length === 0"
-          class="text-[12px] px-2 py-0.5 rounded transition-colors hover:bg-[var(--color-surface-container)] disabled:opacity-40"
+          @click="onClearChat"
+          class="px-2 py-1 rounded text-[12px] transition-colors hover:bg-[var(--color-surface-container)] shrink-0"
           :style="{ color: 'var(--color-on-surface-variant)' }"
         >
-          清空全部
+          清空
         </button>
-      </div>
-
-      <!-- URL 输入 -->
-      <div class="px-4 py-3 shrink-0 flex flex-col gap-2 border-b"
-        :style="{ borderColor: 'var(--color-outline-variant)' }">
-        <div class="flex gap-2">
-          <input
-            v-model="newUrl"
-            @keydown.enter="onAddDoc"
-            type="text"
-            placeholder="飞书文档 URL（docx / wiki）"
-            class="flex-1 px-2 py-1.5 text-[13px] border rounded focus:outline-none focus:ring-2"
-            :style="{
-              background: 'var(--color-surface-container-lowest)',
-              borderColor: 'var(--color-outline-variant)',
-              color: 'var(--color-on-surface)',
-            }"
-          />
-          <button
-            @click="onAddDoc"
-            :disabled="adding || !newUrl.trim()"
-            class="px-3 py-1.5 rounded text-[13px] font-medium transition-colors disabled:opacity-50 flex items-center gap-1"
-            :style="{
-              background: 'var(--color-primary)',
-              color: 'var(--color-on-primary)',
-            }"
-          >
-            <span class="material-symbols-outlined text-[16px]">{{
-              adding ? 'sync' : 'add'
-            }}</span>
-            {{ adding ? '加载中' : '添加' }}
-          </button>
-        </div>
-        <p
-          v-if="addError"
-          class="text-[12px]"
-          :style="{ color: 'var(--color-error)' }"
-        >
-          {{ addError }}
-        </p>
-      </div>
-
-      <!-- 搜索导入：max-h 限高 + 内部 flex 列布局，避免撑破侧栏 -->
-      <div
-        class="px-4 py-3 border-b flex flex-col min-h-0"
-        :style="{
-          borderColor: 'var(--color-outline-variant)',
-          maxHeight: '42vh',
-          minHeight: '200px',
-        }"
-      >
-        <div class="flex items-center gap-1 mb-2 shrink-0">
-          <span class="material-symbols-outlined text-[15px]" :style="{ color: 'var(--color-primary)' }">search</span>
-          <span class="text-[12px] font-medium" :style="{ color: 'var(--color-on-surface-variant)' }">搜索导入</span>
-        </div>
-        <div class="flex-1 min-h-0 flex flex-col">
-          <DocSearchPanel compact @import="onImportFromSearch" />
-        </div>
-      </div>
-
-      <!-- 文档列表 -->
-      <div class="flex-1 overflow-y-auto p-3 flex flex-col gap-2">
-        <div
-          v-if="docs.length === 0"
-          class="text-center mt-8 text-[13px]"
-          :style="{ color: 'var(--color-on-surface-variant)' }"
-        >
-          先添加至少一份文档作为上下文
-        </div>
-        <div
-          v-for="(d, i) in docs"
-          :key="i"
-          class="rounded border overflow-hidden"
+        <button
+          @click="onSaveSession"
+          class="px-3 py-1.5 rounded text-[13px] font-medium transition-colors flex items-center gap-1 border shrink-0"
           :style="{
             background: 'var(--color-surface-container-lowest)',
             borderColor: 'var(--color-outline-variant)',
+            color: 'var(--color-on-surface)',
           }"
         >
-          <div class="flex items-center justify-between px-3 py-2 gap-2">
-            <button
-              class="flex-1 text-left flex items-center gap-2 min-w-0"
-              @click="toggleDoc(i)"
-            >
-              <span
-                class="material-symbols-outlined text-[16px] shrink-0"
-                :style="{ color: 'var(--color-primary)' }"
-                >description</span
-              >
-              <span
-                class="truncate text-[13px] font-medium"
-                :style="{ color: 'var(--color-on-surface)' }"
-                >{{ fileNameOf(d.markdown) }}</span
-              >
-              <span
-                class="shrink-0 text-[11px]"
-                :style="{ color: 'var(--color-on-surface-variant)' }"
-                >{{ d.markdown.length }} 字</span
-              >
-            </button>
-            <button
-              @click="onRemoveDoc(i)"
-              aria-label="删除"
-              class="p-1 rounded transition-colors hover:bg-[var(--color-surface-container)]"
-              :style="{ color: 'var(--color-on-surface-variant)' }"
-            >
-              <span class="material-symbols-outlined text-[16px]">close</span>
-            </button>
-          </div>
-          <div
-            v-if="expandedDoc === i"
-            class="px-3 py-2 text-[12px] whitespace-pre-wrap max-h-48 overflow-y-auto border-t"
-            :style="{
-              background: 'var(--color-surface-container)',
-              borderColor: 'var(--color-outline-variant)',
-              color: 'var(--color-on-surface-variant)',
-              fontFamily: 'JetBrains Mono, ui-monospace, monospace',
-            }"
-          >{{ d.markdown.slice(0, 800) }}{{ d.markdown.length > 800 ? '\n...' : '' }}</div>
-        </div>
-      </div>
-    </section>
-
-    <!-- 右栏：对话 -->
-    <section
-      class="flex-1 flex flex-col"
-      :style="{ background: 'var(--color-app-bg)' }"
-    >
-      <!-- 顶部工具条 -->
-      <div
-        class="px-6 py-3 flex items-center justify-between gap-3 shrink-0 border-b"
-        :style="{
-          background: 'var(--color-surface)',
-          borderColor: 'var(--color-outline-variant)',
-        }"
-      >
-        <div class="flex items-center gap-2 min-w-0 flex-1">
-          <input
-            v-model="sessionName"
-            type="text"
-            placeholder="会话名称（可选）"
-            class="flex-1 max-w-md px-2 py-1 text-[13px] border rounded bg-transparent focus:outline-none focus:ring-1"
-            :style="{
-              borderColor: 'var(--color-outline-variant)',
-              color: 'var(--color-on-surface)',
-            }"
-          />
-          <span
-            v-if="saveStatus"
-            class="text-[12px]"
-            :style="{ color: 'var(--color-on-surface-variant)' }"
-            >{{ saveStatus }}</span
-          >
-        </div>
-        <div class="flex items-center gap-2">
-          <button
-            @click="onClearChat"
-            class="px-2 py-1 rounded text-[12px] transition-colors hover:bg-[var(--color-surface-container)]"
-            :style="{ color: 'var(--color-on-surface-variant)' }"
-          >
-            清空对话
-          </button>
-          <button
-            @click="onSaveSession"
-            class="px-3 py-1.5 rounded text-[13px] font-medium transition-colors flex items-center gap-1 border"
-            :style="{
-              background: 'var(--color-surface-container-lowest)',
-              borderColor: 'var(--color-outline-variant)',
-              color: 'var(--color-on-surface)',
-            }"
-          >
-            <span class="material-symbols-outlined text-[16px]">save</span>
-            保存会话
-          </button>
-        </div>
+          <span class="material-symbols-outlined text-[16px]">save</span>
+          保存
+        </button>
       </div>
 
-      <!-- 消息区 -->
-      <div class="flex-1 overflow-y-auto p-6 flex flex-col gap-3">
+      <!-- timeline -->
+      <div class="flex-1 overflow-y-auto p-4">
         <div
-          v-if="messages.length === 0"
-          class="text-center mt-16"
+          v-if="timelineItems.length === 0"
+          class="h-full flex flex-col items-center justify-center text-center"
         >
           <span
-            class="material-symbols-outlined text-[48px]"
+            class="material-symbols-outlined text-[44px]"
             :style="{ color: 'var(--color-outline-variant)' }"
-            >hub</span
+            >forum</span
           >
           <p
-            class="mt-3 text-sm"
+            class="mt-3 text-[13px]"
             :style="{ color: 'var(--color-on-surface-variant)' }"
           >
-            {{
-              docs.length === 0
-                ? '请先在左侧添加上下文文档'
-                : '描述目标 / 提需求，让 Agent 产出结构化方案'
-            }}
+            描述目标 / 提需求，让 Agent 产出结构化方案
           </p>
         </div>
-
-        <div
-          v-for="(m, i) in messages"
-          :key="i"
-          class="flex gap-3 fade-in"
-          :class="m.role === 'user' ? 'flex-row-reverse' : ''"
-        >
-          <div
-            class="w-8 h-8 rounded-full flex items-center justify-center shrink-0"
-            :style="{
-              background:
-                m.role === 'user'
-                  ? 'var(--color-surface-container-high)'
-                  : 'var(--color-primary-container)',
-              color:
-                m.role === 'user'
-                  ? 'var(--color-on-surface)'
-                  : 'var(--color-on-primary-container)',
-            }"
-          >
-            <span class="material-symbols-outlined text-[20px]">{{
-              m.role === 'user' ? 'person' : 'smart_toy'
-            }}</span>
-          </div>
-          <div class="flex flex-col gap-2 max-w-[80%]">
-            <!-- thinking 折叠 -->
-            <details
-              v-if="m.role === 'assistant' && m.thinking"
-              class="rounded border text-[12px]"
-              :style="{
-                background: 'var(--color-thinking-gray)',
-                borderColor: 'var(--color-outline-variant)',
-                color: 'var(--color-on-surface-variant)',
-                fontFamily: 'JetBrains Mono, ui-monospace, monospace',
-              }"
-            >
-              <summary class="cursor-pointer px-3 py-1.5">思考过程</summary>
-              <div class="px-3 py-2 whitespace-pre-wrap">{{ m.thinking }}</div>
-            </details>
-            <div
-              v-if="m.content"
-              class="rounded-lg p-3 shadow-sm border whitespace-pre-wrap text-[14px]"
-              :style="{
-                background:
-                  m.role === 'user'
-                    ? 'var(--color-primary-container)'
-                    : 'var(--color-surface)',
-                borderColor: 'var(--color-outline-variant)',
-                color:
-                  m.role === 'user'
-                    ? 'var(--color-on-primary-container)'
-                    : 'var(--color-on-surface)',
-              }"
-            >{{ m.content }}</div>
-          </div>
-        </div>
-
-        <!-- 当前方案卡片 -->
-        <div
-          v-if="solution"
-          class="rounded-lg border fade-in mt-2"
-          :style="{
-            background: 'var(--color-surface)',
-            borderColor: 'rgba(99, 14, 212, 0.3)',
-            boxShadow: '0 4px 12px rgba(99, 14, 212, 0.06)',
-          }"
-        >
-          <div
-            class="px-4 py-3 flex items-center justify-between border-b"
-            :style="{
-              background: 'rgba(124, 58, 237, 0.05)',
-              borderColor: 'var(--color-outline-variant)',
-            }"
-          >
-            <div class="flex items-center gap-2 min-w-0">
-              <span
-                class="material-symbols-outlined text-[18px] shrink-0"
-                :style="{ color: 'var(--color-primary)' }"
-                >article</span
-              >
-              <h4
-                class="font-semibold text-[15px] truncate"
-                :style="{ color: 'var(--color-on-surface)' }"
-              >
-                {{ solution.title || '当前方案' }}
-              </h4>
-              <span
-                v-if="solution.summary"
-                class="px-2 py-0.5 rounded-sm text-[11px] shrink-0"
-                :style="{
-                  background: 'rgba(99, 14, 212, 0.1)',
-                  color: 'var(--color-primary)',
-                }"
-                >{{ solution.summary }}</span
-              >
-            </div>
-            <button
-              @click="onExport"
-              class="px-3 py-1.5 rounded text-[13px] font-medium transition-colors flex items-center gap-1"
-              :style="{
-                background: 'var(--color-secondary)',
-                color: 'var(--color-on-secondary)',
-              }"
-            >
-              <span class="material-symbols-outlined text-[16px]"
-                >download</span
-              >
-              导出方案 .md
-            </button>
-          </div>
-          <div
-            class="p-4 max-h-[420px] overflow-y-auto whitespace-pre-wrap text-[13px]"
-            style="font-family: 'JetBrains Mono', ui-monospace, monospace"
-            :style="{ color: 'var(--color-on-surface)' }"
-          >{{ solution.markdown }}</div>
-        </div>
-
-        <p
-          v-if="chatError"
-          class="text-[13px] mt-2"
-          :style="{ color: 'var(--color-error)' }"
-        >
-          {{ chatError }}
-        </p>
+        <ConversationTimeline
+          v-else
+          :items="timelineItems"
+          :running="running"
+          @open-artifact="onOpenArtifact"
+          @export-solution="onExport"
+          @overwrite-solution="onOverwriteFromDrawer"
+          @action="onAction"
+        />
       </div>
 
       <!-- 输入区 -->
       <div
-        class="p-4 shrink-0 border-t"
-        :style="{
-          background: 'var(--color-surface)',
-          borderColor: 'var(--color-outline-variant)',
-        }"
+        class="p-3 shrink-0 border-t"
+        :style="{ borderColor: 'var(--color-outline-variant)' }"
       >
+        <p
+          v-if="chatError"
+          class="text-[12px] mb-2"
+          :style="{ color: 'var(--color-error)' }"
+        >
+          {{ chatError }}
+        </p>
         <div
           class="rounded-lg border focus-within:ring-2"
           :style="{
@@ -592,7 +659,7 @@ function onClearChat() {
             <span
               class="text-[12px]"
               :style="{ color: 'var(--color-on-surface-variant)' }"
-              >{{ docs.length }} 份上下文 · {{ messages.length }} 条对话</span
+              >{{ docs.length }} 份上下文</span
             >
             <button
               @click="onSend"
@@ -614,5 +681,15 @@ function onClearChat() {
         </div>
       </div>
     </section>
+
+    <!-- artifact drawer（Teleport 到 body，从右侧抽屉展开） -->
+    <ArtifactDrawer
+      :open="drawerOpen"
+      :artifact="drawerArtifact"
+      :is-latest="drawerIsLatest"
+      @close="onCloseDrawer"
+      @export-solution="onExport"
+      @overwrite-solution="onOverwriteFromDrawer"
+    />
   </main>
 </template>

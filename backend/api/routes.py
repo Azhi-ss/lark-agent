@@ -16,7 +16,13 @@ from pydantic import BaseModel, Field
 from backend.agent.agent import run_agent_stream, run_solution_stream
 from backend.config import get_runtime_llm, settings, update_runtime_llm
 from backend.lark.cli_wrapper import LarkError, fetch_doc, search_docs, update_doc
-from backend.lark.doc_xml import blocks_to_blocklist, blocks_to_text, parse_xml
+from backend.lark.doc_xml import (
+    blocks_to_blocklist,
+    blocks_to_docx_bytes,
+    blocks_to_markdown,
+    blocks_to_text,
+    parse_xml,
+)
 
 router = APIRouter()
 
@@ -95,8 +101,10 @@ def load_doc(req: LoadRequest) -> LoadResponse:
 
 @router.post("/agent/chat")
 async def agent_chat(req: ChatRequest):
-    """SSE 流：推送 agent 的 thinking / text / done 事件。
+    """SSE 流：推送统一产品语义事件。
 
+    事件类型：status / thinking_summary / assistant_text / artifact /
+    action_required / complete / error。
     P2：后端自行 fetch 文档 XML（with-ids）→ parse_xml → blocks_to_text 作为
     agent 上下文；前端只传 url + instruction。
     """
@@ -110,6 +118,7 @@ async def agent_chat(req: ChatRequest):
     doc_text = blocks_to_text(blocks)
 
     def gen():
+        yield 'data: {"type":"status","data":{"label":"加载上下文中"}}\n\n'
         for ev in run_agent_stream(doc_text, req.instruction):
             yield ev.as_sse()
 
@@ -133,14 +142,24 @@ class SolutionRequest(BaseModel):
 
 @router.post("/agent/solution")
 async def agent_solution(req: SolutionRequest):
-    """SSE 流：方案构建模式。事件 thinking / text / done(含 solution) / error。"""
+    """SSE 流：方案构建模式，推送统一产品语义事件。
+
+    事件类型：status / thinking_summary / assistant_text / artifact /
+    action_required / complete / error。
+    """
     from fastapi.responses import StreamingResponse
 
     docs = [d.model_dump() for d in req.docs]
     messages = [m.model_dump() for m in req.messages]
 
     def gen():
-        for ev in run_solution_stream(docs, messages):
+        yield 'data: {"type":"status","data":{"label":"加载上下文中"}}\n\n'
+        # 首轮（仅当前一条 user 消息）无上一版方案，不发 overwrite 确认；
+        # 多轮（存在历史对话）视为有上一版方案。
+        has_previous_solution = len(messages) > 1
+        for ev in run_solution_stream(
+            docs, messages, has_previous_solution=has_previous_solution
+        ):
             yield ev.as_sse()
 
     return StreamingResponse(gen(), media_type="text/event-stream")
@@ -500,21 +519,63 @@ def docs_search(
 
 
 class ExportRequest(BaseModel):
-    markdown: str
-    filename: str = "document.md"
+    markdown: str | None = None
+    url: str | None = None
+    format: str = "md"
+    filename: str = "document"
 
 
 @router.post("/doc/export")
 def export_markdown(req: ExportRequest):
-    """把 markdown 作为附件下载。"""
+    """导出文档附件。
+
+    兼容旧调用：传 markdown 时直接下载 .md。
+    新调用：传 url + format(md/docx) 时拉取飞书 XML 并导出完整文档。
+    """
     from fastapi.responses import StreamingResponse
 
-    buf = io.BytesIO(req.markdown.encode("utf-8"))
-    safe_name = req.filename or "document.md"
-    if not safe_name.lower().endswith(".md"):
-        safe_name += ".md"
-    headers = {"Content-Disposition": f'attachment; filename="{safe_name}"'}
-    return StreamingResponse(buf, media_type="text/markdown", headers=headers)
+    export_format = req.format.strip().lower()
+    if export_format == "markdown":
+        export_format = "md"
+    if export_format not in {"md", "docx"}:
+        raise HTTPException(status_code=400, detail="format 仅支持 md 或 docx")
+
+    filename = _export_filename(req.filename, export_format)
+    if req.url:
+        try:
+            xml = fetch_doc(req.url, doc_format="xml", detail="with-ids")
+        except LarkError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        blocks = parse_xml(xml.content_xml)
+        if export_format == "docx":
+            data = blocks_to_docx_bytes(blocks)
+            media_type = (
+                "application/vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"
+            )
+        else:
+            data = blocks_to_markdown(blocks).encode("utf-8")
+            media_type = "text/markdown; charset=utf-8"
+    elif req.markdown is not None:
+        if export_format != "md":
+            raise HTTPException(status_code=400, detail="markdown 内容仅支持导出 md")
+        data = req.markdown.encode("utf-8")
+        media_type = "text/markdown; charset=utf-8"
+    else:
+        raise HTTPException(status_code=400, detail="必须提供 url 或 markdown")
+
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    return StreamingResponse(io.BytesIO(data), media_type=media_type, headers=headers)
+
+
+def _export_filename(filename: str, export_format: str) -> str:
+    """规整下载文件名，避免路径片段进入 Content-Disposition。"""
+    suffix = ".docx" if export_format == "docx" else ".md"
+    safe_name = Path(filename or "document").name or "document"
+    lower = safe_name.lower()
+    if lower.endswith((".md", ".markdown", ".docx")):
+        safe_name = safe_name.rsplit(".", 1)[0]
+    return safe_name + suffix
 
 
 class LoadManyRequest(BaseModel):

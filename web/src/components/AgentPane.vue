@@ -1,56 +1,33 @@
 <script setup>
-import { ref, computed } from 'vue'
+import ConversationTimeline from './timeline/ConversationTimeline.vue'
 
-const props = defineProps({
+/**
+ * AgentPane —— editor 模式右侧 agent 面板。
+ * P3：输出区由「Thinking Card + 气泡 + located/unlocated 建议列表」
+ * 统一替换为 ConversationTimeline；建议审阅移入 ArtifactDrawer。
+ *
+ * 保留：顶部指令输入区 + 快捷指令 + 处理按钮（功能不变，视觉对齐飞书协作气质）。
+ */
+defineProps({
   loaded: { type: Boolean, required: true },
   running: { type: Boolean, default: false },
   instruction: { type: String, required: true },
-  agentText: { type: String, default: '' },
-  agentThinking: { type: String, default: '' },
-  replacements: { type: Array, default: () => [] },
-  replacementLocations: { type: Array, default: () => [] },
+  timelineItems: { type: Array, default: () => [] },
 })
-const emit = defineEmits(['update:instruction', 'chat', 'quick-action', 'locate'])
-
-const thinkingOpen = ref(false)
-const copiedIdx = ref(-1)
+const emit = defineEmits([
+  'update:instruction',
+  'chat',
+  'quick-action',
+  'open-artifact',
+  'locate',
+  'accept',
+  'reject',
+  'writeback',
+  'action',
+])
 
 function quick(text) {
   emit('quick-action', text)
-}
-
-// 已定位到某 block 的建议：显示摘要 + 「定位到文档」
-const located = computed(() =>
-  props.replacements
-    .map((r, i) => ({ ...r, blockId: props.replacementLocations[i] ?? null }))
-    .filter((x) => x.blockId !== null && x.blockId !== undefined)
-)
-
-// 无法自动定位的建议：单独分组，提示手动应用 + 复制内容
-const unlocated = computed(() =>
-  props.replacements.filter((_, i) => props.replacementLocations[i] == null)
-)
-
-function locate(blockId) {
-  emit('locate', blockId)
-}
-
-function copyContent(text, i) {
-  if (!navigator.clipboard) return
-  navigator.clipboard
-    .writeText(text)
-    .then(() => {
-      copiedIdx.value = i
-      window.setTimeout(() => {
-        if (copiedIdx.value === i) copiedIdx.value = -1
-      }, 1500)
-    })
-    .catch(() => {})
-}
-
-function truncate(s, n) {
-  if (!s) return ''
-  return s.length > n ? s.slice(0, n) + '…' : s
 }
 </script>
 
@@ -138,11 +115,11 @@ function truncate(s, n) {
       </div>
     </div>
 
-    <!-- 输出流 -->
+    <!-- 统一 timeline 输出区 -->
     <div class="flex-1 overflow-y-auto p-6 flex flex-col gap-3">
-      <!-- 空状态 -->
+      <!-- 空态：timeline 为空且非 running -->
       <div
-        v-if="!agentThinking && !agentText && replacements.length === 0 && !running"
+        v-if="timelineItems.length === 0 && !running"
         class="text-center mt-16"
       >
         <span
@@ -159,201 +136,17 @@ function truncate(s, n) {
         </p>
       </div>
 
-      <!-- Thinking Card -->
-      <div
-        v-if="agentThinking || running"
-        class="rounded-lg overflow-hidden border"
-        :style="{
-          background: 'var(--color-thinking-gray)',
-          borderColor: 'var(--color-outline-variant)',
-        }"
-      >
-        <button
-          @click="thinkingOpen = !thinkingOpen"
-          class="w-full flex items-center justify-between p-3 text-left transition-colors hover:bg-[var(--color-surface-variant)]"
-        >
-          <span
-            class="flex items-center gap-2 text-[13px]"
-            style="font-family: 'JetBrains Mono', ui-monospace, monospace"
-            :style="{ color: 'var(--color-on-surface-variant)' }"
-          >
-            <span
-              class="material-symbols-outlined text-[16px]"
-              :class="{ spin: running }"
-              :style="{ color: 'var(--color-primary)' }"
-              >sync</span
-            >
-            {{ running ? '正在分析文档语义...' : '思考过程（已完成）' }}
-          </span>
-          <span
-            class="material-symbols-outlined transition-colors"
-            :style="{ color: 'var(--color-outline)' }"
-          >
-            {{ thinkingOpen ? 'expand_less' : 'expand_more' }}
-          </span>
-        </button>
-        <div
-          v-show="thinkingOpen && agentThinking"
-          class="p-4 text-[13px] whitespace-pre-wrap"
-          style="font-family: 'JetBrains Mono', ui-monospace, monospace"
-          :style="{
-            background: 'var(--color-surface-container-lowest)',
-            color: 'var(--color-on-surface-variant)',
-            borderTop: '1px solid var(--color-outline-variant)',
-          }"
-        >{{ agentThinking }}</div>
-      </div>
-
-      <!-- Agent 回复气泡 -->
-      <div v-if="agentText" class="flex gap-3 fade-in">
-        <div
-          class="w-8 h-8 rounded-full flex items-center justify-center shrink-0"
-          :style="{
-            background: 'var(--color-primary-container)',
-            color: 'var(--color-on-primary-container)',
-          }"
-        >
-          <span class="material-symbols-outlined text-[20px]">smart_toy</span>
-        </div>
-        <div
-          class="rounded-lg rounded-tl-none p-4 shadow-sm max-w-[85%] border"
-          :style="{
-            background: 'var(--color-surface)',
-            borderColor: 'var(--color-outline-variant)',
-          }"
-        >
-          <p
-            class="whitespace-pre-wrap text-[15px]"
-            :style="{ color: 'var(--color-on-surface)' }"
-          >{{ agentText }}</p>
-        </div>
-      </div>
-
-      <!-- 建议摘要列表（已定位 + 未定位分组） -->
-      <div
-        v-if="replacements.length > 0"
-        class="flex flex-col gap-3 mt-2 pl-11"
-      >
-        <!-- 已定位：摘要 + 定位到文档 -->
-        <div
-          v-for="(r, i) in located"
-          :key="'loc-' + i"
-          class="rounded-lg overflow-hidden fade-in"
-          :style="{
-            background: 'var(--color-surface)',
-            border: '1px solid rgba(99, 14, 212, 0.3)',
-            boxShadow: '0 4px 12px rgba(99, 14, 212, 0.06)',
-          }"
-        >
-          <div
-            class="px-4 py-2.5 flex items-center gap-2"
-            :style="{
-              background: 'rgba(124, 58, 237, 0.05)',
-              borderBottom: '1px solid var(--color-outline-variant)',
-            }"
-          >
-            <span
-              class="material-symbols-outlined text-[18px]"
-              :style="{ color: 'var(--color-primary)' }"
-              >edit_note</span
-            >
-            <span
-              class="text-[13px] font-semibold truncate"
-              :style="{ color: 'var(--color-on-surface)' }"
-              >{{ r.reason || '修改建议' }}</span
-            >
-          </div>
-          <div
-            class="px-4 py-2 text-[12px]"
-            style="font-family: 'JetBrains Mono', ui-monospace, monospace"
-            :style="{ color: 'var(--color-on-surface-variant)' }"
-          >
-            匹配片段：{{ truncate(r.pattern, 80) }}
-          </div>
-          <div
-            class="px-4 py-2.5 flex justify-end"
-            :style="{
-              background: 'var(--color-surface-container-lowest)',
-              borderTop: '1px solid var(--color-outline-variant)',
-            }"
-          >
-            <button
-              @click="locate(r.blockId)"
-              class="px-3 py-1 rounded transition-colors text-[13px] flex items-center gap-1"
-              :style="{
-                background: 'var(--color-primary)',
-                color: 'var(--color-on-primary)',
-              }"
-            >
-              <span class="material-symbols-outlined text-[16px]">my_location</span>
-              定位到文档
-            </button>
-          </div>
-        </div>
-
-        <!-- 未定位：单独分组，提示手动应用 + 复制内容 -->
-        <div v-if="unlocated.length > 0" class="mt-2">
-          <div
-            class="px-3 py-2 rounded-t-lg flex items-center gap-2 text-[13px] font-semibold"
-            :style="{
-              background: 'var(--color-surface-container)',
-              color: 'var(--color-on-surface-variant)',
-              borderBottom: '1px solid var(--color-outline-variant)',
-            }"
-          >
-            <span class="material-symbols-outlined text-[18px]">help_outline</span>
-            {{ unlocated.length }} 条建议无法自动定位，请手动应用
-          </div>
-          <div class="flex flex-col gap-3 mt-3">
-            <div
-              v-for="(r, i) in unlocated"
-              :key="'un-' + i"
-              class="rounded-lg overflow-hidden fade-in"
-              :style="{
-                background: 'var(--color-surface)',
-                border: '1px solid var(--color-outline-variant)',
-              }"
-            >
-              <div
-                class="px-4 py-2.5 flex items-center gap-2"
-                :style="{ borderBottom: '1px solid var(--color-outline-variant)' }"
-              >
-                <span
-                  class="material-symbols-outlined text-[18px]"
-                  :style="{ color: 'var(--color-on-surface-variant)' }"
-                  >edit_note</span
-                >
-                <span
-                  class="text-[13px] font-semibold truncate"
-                  :style="{ color: 'var(--color-on-surface)' }"
-                  >{{ r.reason || '修改建议' }}</span
-                >
-              </div>
-              <pre
-                class="m-0 px-4 py-3 text-[12px] whitespace-pre-wrap"
-                style="font-family: 'JetBrains Mono', ui-monospace, monospace"
-                :style="{ color: 'var(--color-on-surface)' }"
-              >{{ r.content }}</pre>
-              <div
-                class="px-4 py-2.5 flex justify-end"
-                :style="{ background: 'var(--color-surface-container-lowest)' }"
-              >
-                <button
-                  @click="copyContent(r.content, i)"
-                  class="px-3 py-1 rounded transition-colors text-[13px] flex items-center gap-1"
-                  :style="{
-                    background: copiedIdx === i ? 'var(--color-success-surface)' : 'var(--color-surface-container-high)',
-                    color: copiedIdx === i ? 'var(--color-success-text)' : 'var(--color-on-surface-variant)',
-                  }"
-                >
-                  <span class="material-symbols-outlined text-[16px]">content_copy</span>
-                  {{ copiedIdx === i ? '已复制' : '复制内容' }}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
+      <ConversationTimeline
+        v-else
+        :items="timelineItems"
+        :running="running"
+        @open-artifact="(id) => emit('open-artifact', id)"
+        @action="(id) => emit('action', id)"
+        @locate="(p) => emit('locate', p)"
+        @accept="(p) => emit('accept', p)"
+        @reject="(p) => emit('reject', p)"
+        @writeback="(id) => emit('writeback', id)"
+      />
     </div>
   </section>
 </template>

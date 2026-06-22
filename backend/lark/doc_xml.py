@@ -10,11 +10,14 @@
 """
 from __future__ import annotations
 
+import io
 import re
 import xml.etree.ElementTree as ET
+import zipfile
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Any
+from xml.sax.saxutils import escape
 
 # 飞书 docx 的顶层块标签
 _BLOCK_TAGS = {
@@ -172,6 +175,11 @@ def block_to_markdown(block: Block) -> str:
     return block.text
 
 
+def blocks_to_markdown(blocks: list[Block]) -> str:
+    """把完整 Block 列表导出为整篇 markdown。"""
+    return "\n\n".join(part for b in blocks if (part := block_to_markdown(b)).strip())
+
+
 def _table_to_markdown(block: Block) -> str:
     """把 table block 转为 markdown 表格（首行表头 + 分隔行）。
 
@@ -188,6 +196,95 @@ def _table_to_markdown(block: Block) -> str:
         cells = [c.strip() for c in row_text.split("|")]
         lines.append(f"| {' | '.join(cells)} |")
     return "\n".join(lines)
+
+
+def blocks_to_docx_bytes(blocks: list[Block]) -> bytes:
+    """把完整 Block 列表导出为最小合法 docx 文件字节。
+
+    不引入第三方依赖；生成标准 OOXML zip，覆盖常见文本块、标题、列表和表格。
+    """
+    document = _docx_document_xml(blocks)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", _DOCX_CONTENT_TYPES)
+        zf.writestr("_rels/.rels", _DOCX_RELS)
+        zf.writestr("word/document.xml", document)
+    return buf.getvalue()
+
+
+def _docx_document_xml(blocks: list[Block]) -> str:
+    body = "".join(_block_to_docx_xml(block) for block in blocks)
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f"<w:body>{body}"
+        '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>'
+        '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" '
+        'w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>'
+        "</w:body></w:document>"
+    )
+
+
+def _block_to_docx_xml(block: Block) -> str:
+    if block.kind == "table":
+        return _table_to_docx_xml(block)
+    if block.kind == "hr":
+        return _docx_paragraph("---")
+    if block.kind in ("ul", "ol"):
+        lines = []
+        for i, child in enumerate(block.children, 1):
+            prefix = f"{i}. " if block.kind == "ol" else "- "
+            lines.append(_docx_paragraph(prefix + child.text))
+        return "".join(lines)
+    if block.kind in ("figure", "img"):
+        label = block.meta.get("alt") or block.meta.get("name") or block.text[:30]
+        return _docx_paragraph(f"[图片: {label}]")
+    if block.kind == "bookmark":
+        return _docx_paragraph(f"[书签: {block.meta.get('name', '')}]")
+    if block.kind == "cite":
+        return _docx_paragraph(f"[引用文件: {block.meta.get('title', '')}]")
+
+    style = None
+    if block.kind == "title":
+        style = "Title"
+    elif block.level:
+        style = f"Heading{min(block.level, 4)}"
+    return _docx_paragraph(block.text, style=style)
+
+
+def _docx_paragraph(text: str, *, style: str | None = None) -> str:
+    style_xml = f'<w:pPr><w:pStyle w:val="{style}"/></w:pPr>' if style else ""
+    return f"<w:p>{style_xml}<w:r><w:t xml:space=\"preserve\">{escape(text)}</w:t></w:r></w:p>"
+
+
+def _table_to_docx_xml(block: Block) -> str:
+    rows = []
+    for row in block.children:
+        cells = [c.strip() for c in row.text.split("|")]
+        cell_xml = "".join(
+            f"<w:tc><w:tcPr><w:tcW w:w=\"2400\" w:type=\"dxa\"/></w:tcPr>"
+            f"{_docx_paragraph(cell)}</w:tc>"
+            for cell in cells
+        )
+        rows.append(f"<w:tr>{cell_xml}</w:tr>")
+    return f"<w:tbl>{''.join(rows)}</w:tbl>"
+
+
+_DOCX_CONTENT_TYPES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml"
+    ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>"""
+
+
+_DOCX_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1"
+    Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"
+    Target="word/document.xml"/>
+</Relationships>"""
 
 
 def block_id_of(block: Block) -> str:

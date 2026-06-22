@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import io
 from dataclasses import FrozenInstanceError
 
 import pytest
@@ -13,6 +14,8 @@ from backend.lark.doc_xml import (
     DiffOp,
     block_to_markdown,
     blocks_to_blocklist,
+    blocks_to_docx_bytes,
+    blocks_to_markdown,
     blocks_to_text,
     diff_blocks,
     parse_xml,
@@ -185,6 +188,32 @@ def test_block_to_markdown_pre_includes_lang_header():
     """pre 带 lang 属性时围栏代码块带语言头（```python）。"""
     block = parse_xml('<pre lang="python">print(1)</pre>')[0]
     assert block_to_markdown(block) == "```python\nprint(1)\n```"
+
+
+def test_blocks_to_markdown_joins_all_blocks_with_blank_lines():
+    """blocks_to_markdown 把完整 XML block 序列导出为整篇 markdown。"""
+    blocks = parse_xml("<title>周报</title><h1>进展</h1><p>完成 A</p>")
+
+    assert blocks_to_markdown(blocks) == "# 周报\n\n# 进展\n\n完成 A"
+
+
+def test_blocks_to_docx_bytes_returns_valid_docx_zip_with_content():
+    """blocks_to_docx_bytes 生成最小合法 docx 包，并包含文档正文文本。"""
+    import zipfile
+
+    blocks = parse_xml("<title>周报</title><h1>进展</h1><p>完成 A</p>")
+    data = blocks_to_docx_bytes(blocks)
+
+    assert data.startswith(b"PK")
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        names = set(zf.namelist())
+        assert "[Content_Types].xml" in names
+        assert "_rels/.rels" in names
+        assert "word/document.xml" in names
+        document_xml = zf.read("word/document.xml").decode("utf-8")
+    assert "周报" in document_xml
+    assert "进展" in document_xml
+    assert "完成 A" in document_xml
 
 
 # ===== blocks_to_blocklist：前端 Block 契约（P2 §3.1，XML 单一真相源） =====
