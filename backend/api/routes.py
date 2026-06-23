@@ -14,8 +14,6 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from backend.agent.agent import AgentEvent, run_agent_stream, run_solution_stream
-from backend.agent.general_agent import run_general_agent_stream
-from backend.agent.tool_registry import apply_workspace_file_edit
 from backend.config import get_runtime_llm, settings, update_runtime_llm
 from backend.lark.cli_wrapper import LarkError, fetch_doc, search_docs, update_doc
 from backend.lark.doc_xml import (
@@ -145,15 +143,6 @@ class SolutionRequest(BaseModel):
     has_previous_solution: bool | None = None
 
 
-class GeneralMessage(BaseModel):
-    role: str = "user"
-    content: str = ""
-
-
-class GeneralAgentRequest(BaseModel):
-    messages: list[GeneralMessage] = Field(default_factory=list)
-
-
 @router.post("/agent/solution")
 async def agent_solution(req: SolutionRequest):
     """SSE 流：方案构建模式，推送统一产品语义事件。
@@ -177,21 +166,6 @@ async def agent_solution(req: SolutionRequest):
         for ev in run_solution_stream(
             docs, messages, has_previous_solution=has_previous_solution
         ):
-            yield ev.as_sse()
-
-    return StreamingResponse(gen(), media_type="text/event-stream")
-
-
-@router.post("/agent/general")
-async def agent_general(req: GeneralAgentRequest):
-    """SSE 流：通用 Agent 模式，支持自然聊天和受控工具调用。"""
-    from fastapi.responses import StreamingResponse
-
-    messages = [m.model_dump() for m in req.messages]
-
-    def gen():
-        yield AgentEvent("status", {"label": "通用 Agent 思考中"}).as_sse()
-        for ev in run_general_agent_stream(messages):
             yield ev.as_sse()
 
     return StreamingResponse(gen(), media_type="text/event-stream")
@@ -716,22 +690,6 @@ def workspace_list() -> dict[str, Any]:
     # 按 saved_at 倒序
     metas.sort(key=lambda m: m["saved_at"], reverse=True)
     return {"sessions": metas}
-
-
-class WorkspaceFileApplyRequest(BaseModel):
-    path: str
-    content: str
-
-
-@router.post("/workspace/file/apply")
-def workspace_file_apply(req: WorkspaceFileApplyRequest) -> dict[str, Any]:
-    """应用通用 Agent 生成的本地文件编辑建议。"""
-    try:
-        return apply_workspace_file_edit(req.path, req.content)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"写入文件失败: {exc!s}") from exc
 
 
 @router.get("/workspace/{session_id}")
