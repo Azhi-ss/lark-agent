@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 def _find_lark_cli() -> str:
@@ -28,12 +28,13 @@ settings = Settings()
 
 # ----- 运行时可变的 LLM 接入配置 -----
 #
-# 启动配置 Settings 是 frozen 的（不可变原则）。但 LLM 的 base_url / api_key /
-# model 需要支持运行时从设置面板修改，因此单独放一个可变状态对象。默认值仍从
-# 环境变量取，首次启动等价于旧行为；设置面板 POST 后即时覆盖。
-@dataclass
+# 启动配置 Settings 是 frozen 的（不可变原则）。LLM 的 base_url / api_key /
+# model 需要支持运行时从设置面板修改，故单独放一个可变状态变量持有 frozen 实例：
+# update 时用 dataclasses.replace 生成新实例整体替换，保持不可变原则。
+# 默认值仍从环境变量取，首次启动等价于旧行为；设置面板 POST 后即时覆盖。
+@dataclass(frozen=True)
 class RuntimeLLMConfig:
-    """运行时可修改的 LLM 接入配置。"""
+    """运行时可修改的 LLM 接入配置（frozen，update 返回新实例）。"""
 
     base_url: str = os.environ.get("ANTHROPIC_BASE_URL", "")
     api_key: str = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -61,16 +62,23 @@ def update_runtime_llm(
     thinking_enabled: bool | None = None,
     thinking_budget: int | None = None,
 ) -> None:
-    """部分更新运行时 LLM 配置；传 None 的字段保持不变（用于密码框留空=不改）。"""
+    """部分更新运行时 LLM 配置；传 None 的字段保持不变（用于密码框留空=不改）。
+
+    frozen 实例不可原地 mutate，用 replace 生成新实例整体替换全局引用。
+    """
+    global _runtime_llm
+    updates: dict[str, object] = {}
     if base_url is not None:
-        _runtime_llm.base_url = base_url
+        updates["base_url"] = base_url
     if api_key is not None:
-        _runtime_llm.api_key = api_key
+        updates["api_key"] = api_key
     if auth_token is not None:
-        _runtime_llm.auth_token = auth_token
+        updates["auth_token"] = auth_token
     if model is not None:
-        _runtime_llm.model = model
+        updates["model"] = model
     if thinking_enabled is not None:
-        _runtime_llm.thinking_enabled = thinking_enabled
+        updates["thinking_enabled"] = thinking_enabled
     if thinking_budget is not None:
-        _runtime_llm.thinking_budget = thinking_budget
+        updates["thinking_budget"] = thinking_budget
+    if updates:
+        _runtime_llm = replace(_runtime_llm, **updates)

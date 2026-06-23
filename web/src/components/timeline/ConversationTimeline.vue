@@ -37,6 +37,7 @@ const emit = defineEmits([
   'writeback',
   'exportSolution',
   'overwriteSolution',
+  'dismiss',
 ])
 
 // action_required 文案与确认 emit 映射
@@ -56,6 +57,14 @@ const ACTION_META = {
     confirmText: '覆盖方案',
     confirmEmit: 'overwriteSolution',
     confirmStyle: { background: 'var(--color-error)', color: 'var(--color-on-primary)' },
+  },
+  workspace_file_apply: {
+    icon: 'description',
+    title: '需要应用文件编辑',
+    desc: 'Agent 准备将建议内容写入本地工作区文件，请确认。',
+    confirmText: '应用文件',
+    confirmEmit: 'action',
+    confirmStyle: { background: 'var(--color-primary)', color: 'var(--color-on-primary)' },
   },
 }
 
@@ -77,7 +86,10 @@ function confirmAction(item) {
 }
 
 function cancelAction(item) {
-  emit('reject', item.id)
+  // action_required 的「取消」与 artifact suggestion 的「拒绝」是两件事，
+  // 不复用 reject 通道。dismiss 通知集成层移除/收起该 action_required 卡片。
+  item.dismissed = true
+  emit('dismiss', item.id)
 }
 </script>
 
@@ -123,7 +135,7 @@ function cancelAction(item) {
 
       <!-- action_required（内联） -->
       <div
-        v-else-if="item.kind === 'action_required'"
+        v-else-if="item.kind === 'action_required' && !item.dismissed"
         class="rounded-lg border fade-in p-4 flex items-start gap-3"
         :style="{
           background: 'var(--color-surface)',

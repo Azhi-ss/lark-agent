@@ -8,9 +8,10 @@
 """
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import anthropic
 
@@ -65,11 +66,19 @@ class Replacement:
 class AgentEvent:
     """流式事件，供 SSE 推送。"""
 
-    type: str  # thinking_summary / assistant_text / artifact / action_required / complete / error
+    # 产品语义事件契约；Literal 在类型层捕获 typo（如 "complet"/"assitant_text"）。
+    type: Literal[
+        "status",
+        "thinking_summary",
+        "assistant_text",
+        "artifact",
+        "action_required",
+        "complete",
+        "error",
+    ]
     data: dict[str, Any]
 
     def as_sse(self) -> str:
-        import json
         payload = json.dumps({"type": self.type, "data": self.data}, ensure_ascii=False)
         return f"data: {payload}\n\n"
 
@@ -134,6 +143,8 @@ def _make_client() -> anthropic.Anthropic:
         kwargs["api_key"] = cfg.api_key
     else:
         # 走代理：base_url + auth_token
+        if not cfg.auth_token:
+            raise ValueError("未配置 api_key 或 auth_token，请在设置面板配置 LLM 接入")
         kwargs["auth_token"] = cfg.auth_token
         kwargs["base_url"] = cfg.base_url
     return anthropic.Anthropic(**kwargs)
@@ -204,8 +215,8 @@ def run_agent_stream(
     """
     try:
         client = _make_client()
-    except KeyError as exc:
-        yield AgentEvent("error", {"message": f"缺少环境变量: {exc}"})
+    except ValueError as exc:
+        yield AgentEvent("error", {"message": str(exc)})
         return
 
     user_msg = f"# 周报原文\n\n{doc_text}\n\n---\n# 编辑指令\n{instruction}"
@@ -242,7 +253,6 @@ def run_agent_stream(
                         current_tool_input["_raw"] += delta.partial_json
                 elif et == "content_block_stop":
                     if current_tool_input.get("name") == "edit_document":
-                        import json
                         try:
                             parsed = json.loads(current_tool_input.get("_raw", "{}"))
                             for r in parsed.get("replacements", []):
@@ -269,6 +279,8 @@ def run_agent_stream(
                     {"message": "模型未产出修改建议（未调用 edit_document）"},
                 )
                 return
+            # final_text 是 assistant 的自然语言旁白（text_delta 累积），非"编辑后文档全文"。
+            # 前端 DocumentEditsArtifact 仅消费 replacements，final_text 留作调试/未来 diff 展示。
             final_text = "".join(text_buf)
             yield AgentEvent("artifact", {
                 "artifact_type": "document_edits",
@@ -321,8 +333,8 @@ def run_solution_stream(
     """
     try:
         client = _make_client()
-    except KeyError as exc:
-        yield AgentEvent("error", {"message": f"缺少环境变量: {exc}"})
+    except ValueError as exc:
+        yield AgentEvent("error", {"message": str(exc)})
         return
 
     if not messages:
@@ -369,7 +381,6 @@ def run_solution_stream(
                         current_tool_input["_raw"] += delta.partial_json
                 elif et == "content_block_stop":
                     if current_tool_input.get("name") == "produce_solution":
-                        import json
                         try:
                             parsed = json.loads(current_tool_input.get("_raw", "{}"))
                             solution = Solution(

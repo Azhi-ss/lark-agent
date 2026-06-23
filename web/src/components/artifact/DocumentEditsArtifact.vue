@@ -4,25 +4,18 @@ import { ref, computed } from 'vue'
 /**
  * document_edits artifact 详情：replacements 列表 + 底部写回按钮。
  * - 每条 replacement 渲染为卡片：reason 标题 / pattern 片段（mono 截断）/ content 预览
- * - 已定位条目：定位 / 接受 / 拒绝（接受/拒绝仅 isLatest 启用）
- * - 未定位条目（unlocatedIndices 命中）：仅复制内容
+ * - 每条都有：定位 / 复制内容（接受/拒绝仅 isLatest 启用）
  * - emit locate/accept/reject 传 { pattern, index }，由 ArtifactDrawer 透传
  *   blockId 由集成层在 locate 时解析 pattern → blockId，本组件不感知 blockId
  */
 const props = defineProps({
   payload: { type: Object, default: () => ({}) }, // { replacements, final_text }
   isLatest: { type: Boolean, default: false },
-  unlocatedIndices: { type: Array, default: () => [] },
 })
 const emit = defineEmits(['locate', 'accept', 'reject', 'writeback'])
 
 const replacements = computed(() => props.payload?.replacements || [])
-const unlocatedSet = computed(() => new Set(props.unlocatedIndices))
 const copiedIdx = ref(-1)
-
-function isUnlocated(i) {
-  return unlocatedSet.value.has(i)
-}
 
 function truncate(s, n = 80) {
   if (!s) return ''
@@ -93,14 +86,6 @@ function copyContent(text, i) {
             class="text-[13px] font-semibold truncate flex-1"
             :style="{ color: 'var(--color-on-surface)' }"
           >{{ r.reason || '修改建议' }}</span>
-          <span
-            v-if="isUnlocated(i)"
-            class="shrink-0 px-1.5 py-0.5 rounded-sm text-[10px]"
-            :style="{
-              background: 'var(--color-surface-container-high)',
-              color: 'var(--color-on-surface-variant)',
-            }"
-          >未定位</span>
         </div>
 
         <!-- pattern 片段（mono 截断） -->
@@ -128,9 +113,8 @@ function copyContent(text, i) {
             borderTop: '1px solid var(--color-outline-variant)',
           }"
         >
-          <!-- 未定位：复制内容 -->
+          <!-- 复制内容（常驻；未定位建议也可复制） -->
           <button
-            v-if="isUnlocated(i)"
             type="button"
             @click="copyContent(r.content, i)"
             class="px-3 py-1 rounded transition-colors text-[13px] flex items-center gap-1"
@@ -143,49 +127,47 @@ function copyContent(text, i) {
             {{ copiedIdx === i ? '已复制' : '复制内容' }}
           </button>
 
-          <!-- 已定位：定位 / 接受 / 拒绝 -->
-          <template v-else>
-            <button
-              type="button"
-              @click="onLocate(r, i)"
-              class="px-3 py-1 rounded transition-colors text-[13px] flex items-center gap-1"
-              :style="{
-                background: 'var(--color-surface-container-high)',
-                color: 'var(--color-on-surface-variant)',
-              }"
-            >
-              <span class="material-symbols-outlined text-[16px]">my_location</span>
-              定位
-            </button>
-            <button
-              type="button"
-              @click="onAccept(r, i)"
-              :disabled="!isLatest"
-              :title="!isLatest ? '旧版本只读' : ''"
-              class="px-3 py-1 rounded transition-colors text-[13px] flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
-              :style="{
-                background: 'var(--color-secondary)',
-                color: 'var(--color-on-secondary)',
-              }"
-            >
-              <span class="material-symbols-outlined text-[16px]">check</span>
-              接受
-            </button>
-            <button
-              type="button"
-              @click="onReject(r, i)"
-              :disabled="!isLatest"
-              :title="!isLatest ? '旧版本只读' : ''"
-              class="px-3 py-1 rounded transition-colors text-[13px] flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
-              :style="{
-                background: 'var(--color-surface-container-high)',
-                color: 'var(--color-danger-text)',
-              }"
-            >
-              <span class="material-symbols-outlined text-[16px]">close</span>
-              拒绝
-            </button>
-          </template>
+          <!-- 定位 / 接受 / 拒绝 -->
+          <button
+            type="button"
+            @click="onLocate(r, i)"
+            class="px-3 py-1 rounded transition-colors text-[13px] flex items-center gap-1"
+            :style="{
+              background: 'var(--color-surface-container-high)',
+              color: 'var(--color-on-surface-variant)',
+            }"
+          >
+            <span class="material-symbols-outlined text-[16px]">my_location</span>
+            定位
+          </button>
+          <button
+            type="button"
+            @click="onAccept(r, i)"
+            :disabled="!isLatest"
+            :title="!isLatest ? '旧版本只读' : ''"
+            class="px-3 py-1 rounded transition-colors text-[13px] flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
+            :style="{
+              background: 'var(--color-secondary)',
+              color: 'var(--color-on-secondary)',
+            }"
+          >
+            <span class="material-symbols-outlined text-[16px]">check</span>
+            接受
+          </button>
+          <button
+            type="button"
+            @click="onReject(r, i)"
+            :disabled="!isLatest"
+            :title="!isLatest ? '旧版本只读' : ''"
+            class="px-3 py-1 rounded transition-colors text-[13px] flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
+            :style="{
+              background: 'var(--color-surface-container-high)',
+              color: 'var(--color-danger-text)',
+            }"
+          >
+            <span class="material-symbols-outlined text-[16px]">close</span>
+            拒绝
+          </button>
         </div>
       </div>
 

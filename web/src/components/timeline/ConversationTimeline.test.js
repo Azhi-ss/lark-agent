@@ -165,18 +165,19 @@ describe('ConversationTimeline', () => {
     expect(wrapper.emitted('overwriteSolution')[0]).toEqual([9])
   })
 
-  it('action_required「取消」触发 reject(id)', async () => {
-    const wrapper = mount(ConversationTimeline, {
-      props: {
-        items: [
-          { id: 8, kind: 'action_required', reason: 'writeback_confirmation' },
-        ],
-      },
-    })
+  it('action_required「取消」触发 dismiss(id) 且卡片收起', async () => {
+    const items = [
+      { id: 8, kind: 'action_required', reason: 'writeback_confirmation' },
+    ]
+    const wrapper = mount(ConversationTimeline, { props: { items } })
     const cancelBtn = findButtonByText(wrapper, '取消')
     expect(cancelBtn).toBeTruthy()
     await cancelBtn.trigger('click')
-    expect(wrapper.emitted('reject')).toBeTruthy()
-    expect(wrapper.emitted('reject')[0]).toEqual([8])
+    expect(wrapper.emitted('dismiss')).toBeTruthy()
+    expect(wrapper.emitted('dismiss')[0]).toEqual([8])
+    // 卡片标记 dismissed 后不再渲染
+    expect(items[0].dismissed).toBe(true)
+    await wrapper.vm.$nextTick()
+    expect(findButtonByText(wrapper, '取消')).toBeFalsy()
   })
 })
