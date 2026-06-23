@@ -17,7 +17,7 @@ import { computed } from 'vue'
  *   - reject(id)                  忽略该 artifact
  *
  * 纯展示 + emit，不调任何 API。block_id 解析由集成层在 locate 回调里完成
- * （artifact 自身不带 block_id，与 AgentPane replacementLocations 模型一致）。
+ * （artifact 自身不带 block_id）。
  */
 const props = defineProps({
   id: { type: [Number, String], required: true },
@@ -26,7 +26,11 @@ const props = defineProps({
     required: true,
     validator: (v) =>
       v &&
-      (v.artifact_type === 'document_edits' || v.artifact_type === 'solution'),
+      (
+        v.artifact_type === 'document_edits' ||
+        v.artifact_type === 'solution' ||
+        v.artifact_type === 'file_edit'
+      ),
   },
   isLatest: { type: Boolean, default: false },
 })
@@ -49,8 +53,12 @@ function actionPayload(i) {
 const isDocEdits = computed(
   () => props.artifact.artifact_type === 'document_edits',
 )
+const isSolution = computed(() => props.artifact.artifact_type === 'solution')
+const isFileEdit = computed(() => props.artifact.artifact_type === 'file_edit')
 const title = computed(
-  () => props.artifact.title || (isDocEdits.value ? '修改建议' : '方案'),
+  () => props.artifact.title || (
+    isDocEdits.value ? '修改建议' : isFileEdit.value ? '文件编辑建议' : '方案'
+  ),
 )
 const summary = computed(() => props.artifact.summary || '')
 
@@ -64,6 +72,14 @@ const replacements = computed(() => {
 const markdown = computed(() => {
   const p = props.artifact.payload
   return typeof p?.markdown === 'string' ? p.markdown : ''
+})
+
+const fileEdit = computed(() => {
+  const p = props.artifact.payload || {}
+  return {
+    path: typeof p.path === 'string' ? p.path : '',
+    content: typeof p.content === 'string' ? p.content : '',
+  }
 })
 
 function truncate(s, n) {
@@ -103,7 +119,7 @@ function onLocate(index, replacement) {
       <span
         class="material-symbols-outlined text-[18px] shrink-0"
         :style="{ color: 'var(--color-primary)' }"
-        >{{ isDocEdits ? 'edit_note' : 'article' }}</span
+        >{{ isDocEdits ? 'edit_note' : isFileEdit ? 'description' : 'article' }}</span
       >
       <span
         class="text-[13px] font-semibold truncate"
@@ -182,11 +198,19 @@ function onLocate(index, replacement) {
 
     <!-- solution：markdown 预览 -->
     <div
-      v-else
+      v-else-if="isSolution"
       class="p-4 max-h-[420px] overflow-y-auto whitespace-pre-wrap text-[13px]"
       style="font-family: 'JetBrains Mono', ui-monospace, monospace"
       :style="{ color: 'var(--color-on-surface)' }"
     >{{ markdown || '（空方案）' }}</div>
+
+    <!-- file_edit：完整文件内容预览 -->
+    <div
+      v-else
+      class="p-4 max-h-[420px] overflow-y-auto whitespace-pre-wrap text-[13px]"
+      style="font-family: 'JetBrains Mono', ui-monospace, monospace"
+      :style="{ color: 'var(--color-on-surface)' }"
+    >{{ fileEdit.path ? `# ${fileEdit.path}\n\n${fileEdit.content}` : '（空文件编辑）' }}</div>
 
     <!-- 底部操作条 -->
     <div
@@ -209,7 +233,7 @@ function onLocate(index, replacement) {
       </button>
 
       <button
-        v-if="!isDocEdits"
+        v-if="isSolution"
         @click="emit('exportSolution', id)"
         class="px-3 py-1 rounded text-[13px] font-medium transition-colors flex items-center gap-1"
         :style="{
@@ -222,6 +246,7 @@ function onLocate(index, replacement) {
       </button>
 
       <button
+        v-if="!isFileEdit"
         @click="emit('reject', actionPayload(0))"
         :disabled="!isLatest"
         :title="!isLatest ? '旧版本只读' : ''"
@@ -236,6 +261,7 @@ function onLocate(index, replacement) {
       </button>
 
       <button
+        v-if="!isFileEdit"
         @click="emit('accept', actionPayload(0))"
         :disabled="!isLatest"
         :title="!isLatest ? '旧版本只读' : ''"

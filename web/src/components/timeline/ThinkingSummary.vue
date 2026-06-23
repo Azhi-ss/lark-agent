@@ -17,12 +17,16 @@ const props = defineProps({
 })
 
 const open = ref(false)
+// 首次自动展开仅触发一次；用户手动折叠后不再被流式 delta 强制展开。
+const autoOpened = ref(false)
 
-// 首次有内容时自动展开，方便观察流式思考
 watch(
   () => props.text,
   (t) => {
-    if (t && !open.value && props.running) open.value = true
+    if (t && !autoOpened.value && props.running) {
+      open.value = true
+      autoOpened.value = true
+    }
   },
 )
 </script>

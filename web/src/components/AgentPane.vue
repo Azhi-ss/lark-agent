@@ -24,6 +24,9 @@ const emit = defineEmits([
   'reject',
   'writeback',
   'action',
+  'export-solution',
+  'overwrite-solution',
+  'dismiss',
 ])
 
 function quick(text) {
@@ -146,6 +149,9 @@ function quick(text) {
         @accept="(p) => emit('accept', p)"
         @reject="(p) => emit('reject', p)"
         @writeback="(id) => emit('writeback', id)"
+        @export-solution="(id) => emit('export-solution', id)"
+        @overwrite-solution="(id) => emit('overwrite-solution', id)"
+        @dismiss="(id) => emit('dismiss', id)"
       />
     </div>
   </section>

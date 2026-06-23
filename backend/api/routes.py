@@ -13,7 +13,7 @@ import anthropic  # 模块级，便于测试 monkeypatch
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from backend.agent.agent import run_agent_stream, run_solution_stream
+from backend.agent.agent import AgentEvent, run_agent_stream, run_solution_stream
 from backend.config import get_runtime_llm, settings, update_runtime_llm
 from backend.lark.cli_wrapper import LarkError, fetch_doc, search_docs, update_doc
 from backend.lark.doc_xml import (
@@ -118,7 +118,7 @@ async def agent_chat(req: ChatRequest):
     doc_text = blocks_to_text(blocks)
 
     def gen():
-        yield 'data: {"type":"status","data":{"label":"加载上下文中"}}\n\n'
+        yield AgentEvent("status", {"label": "加载上下文中"}).as_sse()
         for ev in run_agent_stream(doc_text, req.instruction):
             yield ev.as_sse()
 
@@ -138,6 +138,9 @@ class SolutionMessage(BaseModel):
 class SolutionRequest(BaseModel):
     docs: list[SolutionDoc] = Field(default_factory=list)
     messages: list[SolutionMessage] = Field(default_factory=list)
+    # 是否已存在上一版方案（非首轮）。前端据"会话内是否已产出 solution artifact"显式传入；
+    # 未传时回退到 messages 长度启发式（>1 视为多轮）。
+    has_previous_solution: bool | None = None
 
 
 @router.post("/agent/solution")
@@ -153,10 +156,13 @@ async def agent_solution(req: SolutionRequest):
     messages = [m.model_dump() for m in req.messages]
 
     def gen():
-        yield 'data: {"type":"status","data":{"label":"加载上下文中"}}\n\n'
-        # 首轮（仅当前一条 user 消息）无上一版方案，不发 overwrite 确认；
-        # 多轮（存在历史对话）视为有上一版方案。
-        has_previous_solution = len(messages) > 1
+        yield AgentEvent("status", {"label": "加载上下文中"}).as_sse()
+        # 优先用请求显式字段；未传时回退到 messages 长度启发式（>1 视为多轮）。
+        has_previous_solution = (
+            req.has_previous_solution
+            if req.has_previous_solution is not None
+            else len(messages) > 1
+        )
         for ev in run_solution_stream(
             docs, messages, has_previous_solution=has_previous_solution
         ):
